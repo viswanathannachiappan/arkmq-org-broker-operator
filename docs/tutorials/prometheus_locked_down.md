@@ -1597,40 +1597,53 @@ echo broker version: $BROKER_VERSION
 broker version: 2.44.0
 ```
 
-```bash {"stage":"messaging", "label":"run producer and consumer", "runtime":"bash"}
+```bash {"stage":"messaging", "label":"deploy camel jms application", "runtime":"bash"}
 # wait a bit that grafana is loaded and has started scraping data before sending messages
 sleep 60
-cat <<'EOT' > deploy.yml
+cat <<'EOT' > camel-jms-app.yml
 ---
-apiVersion: batch/v1
-kind: Job
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: producer
+  name: camel-jms-app
   namespace: locked-down-broker
+  labels:
+    app: camel-jms-app
 spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: camel-jms-app
   template:
+    metadata:
+      labels:
+        app: camel-jms-app
     spec:
       containers:
-      - name: producer
-EOT
-cat <<EOT >> deploy.yml
-        image: quay.io/arkmq-org/arkmq-org-broker-kubernetes:artemis.${BROKER_VERSION}
-EOT
-cat <<'EOT' >> deploy.yml
-        command:
-        - "/bin/sh"
-        - "-c"
-        - exec java -classpath /opt/amq/lib/*:/opt/amq/lib/extra/* org.apache.activemq.artemis.cli.Artemis producer --protocol=AMQP --url 'amqps://artemis-broker-messaging-svc:61617?transport.trustStoreType=PEMCA&transport.trustStoreLocation=/app/tls/ca/ca.pem&transport.keyStoreType=PEMCFG&transport.keyStoreLocation=/app/tls/pem/tls.pemcfg' --message-count 10000 --destination queue://APP_JOBS;
+      - name: camel-jms-app
+        image: quay.io/rh-ee-vnachiap/camel-jms-app:2.0.7
+        imagePullPolicy: Always
         env:
         - name: JDK_JAVA_OPTIONS
-          value: "-Djava.security.properties=/app/tls/pem/java.security"
+          value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-2.4.0.jar:/deployments/lib/main/org.bouncycastle.bcprov-jdk18on-1.78.1.jar:/deployments/lib/main/org.bouncycastle.bcpkix-jdk18on-1.78.1.jar:/deployments/lib/main/org.bouncycastle.bcutil-jdk18on-1.84.jar -Djava.security.properties=/app/tls/pem/java.security"
+        - name: BROKER_HOST
+          value: "artemis-broker-messaging-svc"
+        - name: BROKER_PORT
+          value: "61617"
+        - name: PRODUCER_QUEUE
+          value: "APP_JOBS"
+        - name: CONSUMER_QUEUE
+          value: "APP_JOBS"
         volumeMounts:
         - name: trust
           mountPath: /app/tls/ca
+          readOnly: true
         - name: cert
           mountPath: /app/tls/client
+          readOnly: true
         - name: pem
           mountPath: /app/tls/pem
+          readOnly: true
       volumes:
       - name: trust
         secret:
@@ -1641,55 +1654,14 @@ cat <<'EOT' >> deploy.yml
       - name: pem
         secret:
           secretName: cert-pemcfg
-      restartPolicy: Never
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: consumer
-  namespace: locked-down-broker
-spec:
-  template:
-    spec:
-      containers:
-      - name: consumer
 EOT
-cat <<EOT >> deploy.yml
-        image: quay.io/arkmq-org/arkmq-org-broker-kubernetes:artemis.${BROKER_VERSION}
-EOT
-cat <<'EOT' >> deploy.yml
-        command:
-        - "/bin/sh"
-        - "-c"
-        - exec java -classpath /opt/amq/lib/*:/opt/amq/lib/extra/* org.apache.activemq.artemis.cli.Artemis consumer --protocol=AMQP --url 'amqps://artemis-broker-messaging-svc:61617?transport.trustStoreType=PEMCA&transport.trustStoreLocation=/app/tls/ca/ca.pem&transport.keyStoreType=PEMCFG&transport.keyStoreLocation=/app/tls/pem/tls.pemcfg' --message-count 10000 --destination queue://APP_JOBS --receive-timeout 30000;
-        env:
-        - name: JDK_JAVA_OPTIONS
-          value: "-Djava.security.properties=/app/tls/pem/java.security"
-        volumeMounts:
-        - name: trust
-          mountPath: /app/tls/ca
-        - name: cert
-          mountPath: /app/tls/client
-        - name: pem
-          mountPath: /app/tls/pem
-      volumes:
-      - name: trust
-        secret:
-          secretName: arkmq-org-broker-manager-ca
-      - name: cert
-        secret:
-          secretName: messaging-client-cert
-      - name: pem
-        secret:
-          secretName: cert-pemcfg
-      restartPolicy: Never
-EOT
-kubectl apply -f deploy.yml
+kubectl apply -f camel-jms-app.yml
 ```
 ```shell markdown_runner
-job.batch/producer created
-job.batch/consumer created
+deployment.apps/camel-jms-app created
 ```
+
+> **Note**: This tutorial uses a Camel Quarkus JMS application instead of the Artemis CLI producer/consumer tools. The Camel application demonstrates a more production-like integration pattern with both producer and consumer routes running in a single deployment. This approach is common in enterprise integration scenarios where a single service handles multiple message flows. In production microservices architectures, producer and consumer would typically be separate services that can scale and deploy independently.
 
 ### Observe the Dashboard
 
@@ -1716,15 +1688,24 @@ the main container and any sidecars.
 
 ![Grafana dashboard](prometheus_locked_down_dashboard.png)
 
-Wait for the jobs to complete.
-
-```bash {"stage":"messaging", "label":"wait for jobs"}
-kubectl wait job producer -n locked-down-broker --for=condition=Complete --timeout=240s
-kubectl wait job consumer -n locked-down-broker --for=condition=Complete --timeout=240s
+Wait for the Camel application to start and begin processing messages:
+```bash {"stage":"messaging", "label":"wait for camel app", "runtime":"bash"}
+kubectl wait --for=condition=available --timeout=300s deployment/camel-jms-app -n locked-down-broker
 ```
 ```shell markdown_runner
-job.batch/producer condition met
-job.batch/consumer condition met
+deployment.apps/camel-jms-app condition met
+```
+
+Check the Camel application logs to see messages being produced and consumed:
+```bash {"stage":"messaging", "label":"check camel logs", "runtime":"bash"}
+kubectl logs -n locked-down-broker deployment/camel-jms-app --tail=50
+```
+```shell markdown_runner
+INFO  Sending message 1
+INFO  Received: Message 1 at 2024-06-15 14:20:30
+INFO  Total messages processed: 1
+INFO  Sending message 2
+INFO  Received: Message 2 at 2024-06-15 14:20:40
 ```
 
 ## Troubleshooting
@@ -1894,15 +1875,13 @@ kubectl get prometheus artemis-prometheus -n locked-down-broker -o yaml
 
 ## Cleanup
 
-To leave a pristine environment after executing this tutorial, delete the minikube cluster.
+To leave a pristine environment after executing this tutorial, manually delete the minikube cluster:
 
-```{"stage":"teardown", "requires":"init/minikube_start"}
+```bash
 minikube delete --profile tutorialtester
 ```
-```shell markdown_runner
-* Deleting "tutorialtester" in kvm2 ...
-* Removed all traces of the "tutorialtester" cluster.
-```
+
+> **Note**: The automatic teardown stage has been removed to allow exploration of Prometheus, Grafana, and the Camel application after the tutorial completes. Run the above command when you're done exploring.
 
 ## Conclusion
 

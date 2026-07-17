@@ -322,49 +322,58 @@ EOF
 until kubectl get secret cert-pemcfg -n service-app-project &> /dev/null; do echo "Waiting for secret..." && sleep 2; done
 ```
 
-#### Run Producer Job
+#### Deploy the Camel Load Driver Application
 
-The producer job uses environment variables from the binding secret to connect to the
-correct host and port assigned by the operator. The binding secret name follows the
-pattern `{app-name}-binding-secret`.
-
-```bash {"stage":"test_messaging", "label":"run producer", "runtime":"bash"}
+```bash {"stage":"test_messaging", "label":"deploy camel app", "runtime":"bash"}
 cat <<'EOT' | kubectl apply -f -
-apiVersion: batch/v1
-kind: Job
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: producer
+  name: camel-jms-app
   namespace: service-app-project
 spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: camel-jms-app
   template:
+    metadata:
+      labels:
+        app: camel-jms-app
     spec:
       containers:
-      - name: producer
-        image: quay.io/arkmq-org/arkmq-org-broker-kubernetes:artemis.2.40.0
-        command:
-        - "/bin/sh"
-        - "-c"
-        - exec java -classpath /opt/amq/lib/*:/opt/amq/lib/extra/* org.apache.activemq.artemis.cli.Artemis producer --protocol=AMQP --url amqps://${BROKER_SERVICE_HOST}:${BROKER_SERVICE_PORT}\?transport.trustStoreType=PEMCA\&transport.trustStoreLocation=/app/tls/ca/ca.pem\&transport.keyStoreType=PEMCFG\&transport.keyStoreLocation=/app/tls/pem/tls.pemcfg --message-count 1 --destination queue://APP.JOBS;
+      - name: camel-jms-app
+        image: quay.io/rh-ee-vnachiap/camel-jms-app:4.0.0
+        imagePullPolicy: Always
         env:
-        - name: JDK_JAVA_OPTIONS
-          value: "-Djava.security.properties=/app/tls/pem/java.security"
-        - name: BROKER_SERVICE_HOST
+        - name: BROKER_HOST
           valueFrom:
             secretKeyRef:
               name: first-app-binding-secret
               key: host
-        - name: BROKER_SERVICE_PORT
+        - name: BROKER_PORT
           valueFrom:
             secretKeyRef:
               name: first-app-binding-secret
               key: port
+        - name: PRODUCER_QUEUE
+          value: "APP.JOBS"
+        - name: CONSUMER_QUEUE
+          value: "APP.JOBS"
+        - name: CLIENT_USERNAME
+          value: "first-app"
+        - name: JDK_JAVA_OPTIONS
+          value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-3.0.0.jar:/deployments/lib/main/com.hierynomus.asn-one-0.6.0.jar:/deployments/lib/main/org.slf4j.slf4j-api-2.0.18.jar -Djava.security.properties=/app/tls/pem/java.security"
         volumeMounts:
         - name: trust
           mountPath: /app/tls/ca
+          readOnly: true
         - name: cert
           mountPath: /app/tls/client
+          readOnly: true
         - name: pem
           mountPath: /app/tls/pem
+          readOnly: true
       volumes:
       - name: trust
         secret:
@@ -375,83 +384,106 @@ spec:
       - name: pem
         secret:
           secretName: cert-pemcfg
-      restartPolicy: OnFailure
 EOT
 ```
 
-#### Run Consumer Job
-
-The consumer job also uses the binding secret to access the service endpoint.
-
-```bash {"stage":"test_messaging", "label":"run consumer", "runtime":"bash"}
-cat <<'EOT' | kubectl apply -f -
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: consumer
-  namespace: service-app-project
-spec:
-  template:
-    spec:
-      containers:
-      - name: consumer
-        image: quay.io/arkmq-org/arkmq-org-broker-kubernetes:artemis.2.40.0
-        command:
-        - "/bin/sh"
-        - "-c"
-        - exec java -classpath /opt/amq/lib/*:/opt/amq/lib/extra/* org.apache.activemq.artemis.cli.Artemis consumer --protocol=AMQP --url amqps://${BROKER_SERVICE_HOST}:${BROKER_SERVICE_PORT}\?transport.trustStoreType=PEMCA\&transport.trustStoreLocation=/app/tls/ca/ca.pem\&transport.keyStoreType=PEMCFG\&transport.keyStoreLocation=/app/tls/pem/tls.pemcfg --message-count 1 --destination queue://APP.JOBS --receive-timeout 10000;
-        env:
-        - name: JDK_JAVA_OPTIONS
-          value: "-Djava.security.properties=/app/tls/pem/java.security"
-        - name: BROKER_SERVICE_HOST
-          valueFrom:
-            secretKeyRef:
-              name: first-app-binding-secret
-              key: host
-        - name: BROKER_SERVICE_PORT
-          valueFrom:
-            secretKeyRef:
-              name: first-app-binding-secret
-              key: port
-        volumeMounts:
-        - name: trust
-          mountPath: /app/tls/ca
-        - name: cert
-          mountPath: /app/tls/client
-        - name: pem
-          mountPath: /app/tls/pem
-      volumes:
-      - name: trust
-        secret:
-          secretName: arkmq-org-broker-manager-ca
-      - name: cert
-        secret:
-          secretName: first-app-app-cert
-      - name: pem
-        secret:
-          secretName: cert-pemcfg
-      restartPolicy: OnFailure
-EOT
+```bash {"stage":"test_messaging", "label":"wait for camel app", "runtime":"bash"}
+kubectl wait --for=condition=available --timeout=300s deployment/camel-jms-app -n service-app-project
 ```
 
-Wait for jobs to complete.
+#### Verify Application is Running
 
-```bash {"stage":"test_messaging", "label":"wait for jobs", "runtime":"bash"}
-kubectl wait job producer -n service-app-project --for=condition=Complete --timeout=300s
-kubectl wait job consumer -n service-app-project --for=condition=Complete --timeout=300s
+Check the pod logs to see messages being produced and consumed. You should see no connection errors and messages actively flowing.
+
+```bash {"stage":"test_messaging", "label":"check logs", "runtime":"bash"}
+kubectl logs -n service-app-project -l app=camel-jms-app --tail=50
 ```
 
-### 5. Cleanup
 
-Delete our BrokerApp
+Check the assigned port:
 
-```bash {"stage":"teardown", "label":"delete app", "runtime":"bash"}
+```bash {"stage":"test_messaging", "label":"check assigned port", "runtime":"bash"}
+kubectl get BrokerApp first-app -n service-app-project -o jsonpath='{.status.service.assignedPort}'
+```
+
+View the binding secret contents:
+
+```bash {"stage":"test_messaging", "label":"view binding secret", "runtime":"bash"}
+kubectl get secret first-app-binding-secret -n service-app-project -o jsonpath='{.data.host}' | base64 -d && echo
+kubectl get secret first-app-binding-secret -n service-app-project -o jsonpath='{.data.port}' | base64 -d && echo
+```
+
+
+
+### 5. Verify Application
+
+Check the Camel application logs to see messages being produced and consumed:
+
+```bash {"stage":"verify", "label":"check camel logs", "runtime":"bash"}
+kubectl logs -n service-app-project deployment/camel-jms-app --tail=50
+```
+
+You should see:
+- Producer route sending messages every 10 seconds
+- Consumer route receiving and processing messages
+- No connection errors
+
+
+## 6. Monitoring BrokerService Deployments
+
+### Important Note About Monitoring
+
+**BrokerService does not expose Prometheus metrics by default.** BrokerService is designed as a simplified abstraction that hides technical details from application developers.
+
+For full monitoring with Prometheus and Grafana, you should use the standard **Broker CR** instead, which:
+- Exposes metrics on port 8888
+- Supports ServiceMonitor configuration
+- Provides detailed broker metrics (message rates, queue depth, etc.)
+
+**See the [Prometheus Locked Down Tutorial](prometheus_locked_down.md)** for a complete monitoring setup with the Broker CR.
+
+### Alternative: Monitor via kubectl
+
+Platform operators can still monitor BrokerService deployments using kubectl commands:
+
+**Check BrokerService status:**
+```bash
+kubectl get brokerservice messaging-service -n service-app-project -o yaml
+```
+
+**Check BrokerApp status:**
+```bash
+kubectl get brokerapp first-app -n service-app-project -o yaml
+```
+
+**Check broker pod logs:**
+```bash
+kubectl logs -n service-app-project messaging-service-ss-0 --tail=100
+```
+
+**Check broker pod resource usage:**
+```bash
+kubectl top pod messaging-service-ss-0 -n service-app-project
+```
+
+
+### Cleanup (Manual)
+
+When you're finished exploring, clean up the resources:
+
+```bash
+# Delete the Camel application
+kubectl delete deployment camel-jms-app -n service-app-project
+
+# Delete the BrokerApp (this also deletes the binding secret)
 kubectl delete BrokerApp first-app -n service-app-project
-```
 
-Finally, delete the minikube cluster.
+# Delete the BrokerService
+kubectl delete BrokerService messaging-service -n service-app-project
 
-```bash {"stage":"teardown", "requires":"init/minikube_start", "runtime":"bash"}
+# Delete the namespace (optional)
+kubectl delete namespace service-app-project
+
+# Delete the minikube cluster (optional)
 minikube delete --profile service-app-tutorial
 ```
-
