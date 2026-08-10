@@ -440,8 +440,15 @@ spec:
     spec:
       containers:
       - name: camel-jms-app
-        image: quay.io/rh-ee-vnachiap/camel-jms-app:5.0.0
+        image: quay.io/rh-ee-vnachiap/camel-jms-app:5.0.2
         imagePullPolicy: Always
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
         env:
         - name: BROKER_HOST
           valueFrom:
@@ -662,7 +669,8 @@ EOF
 The default Prometheus should automatically discover the ServiceMonitor within 30 seconds. You can verify by port-forwarding to Prometheus:
 
 ```bash {"stage":"monitoring", "label":"port forward prometheus", "runtime":"bash"}
-kubectl port-forward svc/prometheus-kube-prometheus-prometheus -n service-app-project 9090:9090
+kubectl port-forward svc/prometheus-kube-prometheus-prometheus \
+  -n service-app-project 9090:9090 > /tmp/prometheus-port-forward.log 2>&1 &
 ```
 
 Then open http://localhost:9090/targets in your browser and verify:
@@ -674,11 +682,11 @@ Then open http://localhost:9090/targets in your browser and verify:
 
 The kube-prometheus-stack already includes Grafana with a pre-configured Prometheus datasource. Instead of relying on the Grafana sidecar to discover ConfigMaps (which can be unreliable), we'll inject the dashboard directly into Grafana's provisioning system using Helm values.
 
-### Create Dashboard Values File
+### Create Dashboard and Apply via Helm
 
-Create a Helm values file containing the dashboard configuration. This dashboard uses the JMX exporter metrics that are automatically exposed by the Operator:
+Create the Helm values file and immediately upgrade the Prometheus stack in a single block. This ensures the file exists in the same shell context when Helm reads it:
 
-```bash {"stage":"grafana", "label":"create dashboard values", "runtime":"bash"}
+```bash {"stage":"grafana", "label":"create dashboard values and apply via helm", "runtime":"bash"}
 cat << 'EOF' > grafana-complete-values.yaml
 grafana:
   sidecar:
@@ -703,196 +711,108 @@ grafana:
             "links": [],
             "panels": [
               {
-                "datasource": { "type": "prometheus", "uid": "prometheus" },
-                "fieldConfig": {
-                  "defaults": {
-                    "color": { "mode": "palette-classic" },
-                    "custom": {
-                      "axisCenteredZero": false,
-                      "axisColorMode": "text",
-                      "axisLabel": "",
-                      "axisPlacement": "auto",
-                      "barAlignment": 0,
-                      "drawStyle": "line",
-                      "fillOpacity": 10,
-                      "gradientMode": "none",
-                      "hideFrom": { "tooltip": false, "viz": false, "legend": false },
-                      "lineInterpolation": "linear",
-                      "lineWidth": 1,
-                      "pointSize": 5,
-                      "scaleDistribution": { "type": "linear" },
-                      "showPoints": "never",
-                      "spanNulls": false,
-                      "stacking": { "group": "A", "mode": "none" },
-                      "thresholdsStyle": { "mode": "off" }
-                    },
-                    "mappings": [],
-                    "thresholds": {
-                      "mode": "absolute",
-                      "steps": [{ "color": "green", "value": null }]
-                    },
-                    "unit": "short"
-                  },
-                  "overrides": []
-                },
                 "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-                "id": 1,
-                "options": {
-                  "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
-                  "tooltip": { "mode": "single", "sort": "none" }
-                },
-                "targets": [{
-                  "datasource": { "type": "prometheus", "uid": "prometheus" },
-                  "expr": "sum(broker_queue_message_count{job=\"messaging-service-metrics\"})",
-                  "refId": "A",
-                  "legendFormat": "Total Messages"
-                }],
                 "title": "Queue Message Count",
-                "type": "timeseries"
+                "type": "timeseries",
+                "datasource": { "type": "prometheus", "uid": "prometheus" },
+                "targets": [
+                  {
+                    "expr": "sum by (queue) (broker_queue_message_count{job=\"messaging-service-metrics\"})",
+                    "legendFormat": "{{queue}}",
+                    "refId": "A"
+                  }
+                ],
+                "fieldConfig": { "defaults": { "unit": "short" } }
               },
               {
-                "datasource": { "type": "prometheus", "uid": "prometheus" },
-                "fieldConfig": {
-                  "defaults": {
-                    "color": { "mode": "palette-classic" },
-                    "custom": {
-                      "axisCenteredZero": false,
-                      "axisColorMode": "text",
-                      "axisLabel": "",
-                      "axisPlacement": "auto",
-                      "barAlignment": 0,
-                      "drawStyle": "line",
-                      "fillOpacity": 10,
-                      "gradientMode": "none",
-                      "hideFrom": { "tooltip": false, "viz": false, "legend": false },
-                      "lineInterpolation": "linear",
-                      "lineWidth": 1,
-                      "pointSize": 5,
-                      "scaleDistribution": { "type": "linear" },
-                      "showPoints": "never",
-                      "spanNulls": false,
-                      "stacking": { "group": "A", "mode": "none" },
-                      "thresholdsStyle": { "mode": "off" }
-                    },
-                    "mappings": [],
-                    "thresholds": {
-                      "mode": "absolute",
-                      "steps": [{ "color": "green", "value": null }]
-                    },
-                    "unit": "short"
-                  },
-                  "overrides": []
-                },
                 "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
-                "id": 2,
-                "options": {
-                  "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
-                  "tooltip": { "mode": "single", "sort": "none" }
-                },
-                "targets": [{
-                  "datasource": { "type": "prometheus", "uid": "prometheus" },
-                  "expr": "sum(broker_queue_consumer_count{job=\"messaging-service-metrics\"})",
-                  "refId": "A",
-                  "legendFormat": "Active Consumers"
-                }],
                 "title": "Queue Consumer Count",
-                "type": "timeseries"
+                "type": "timeseries",
+                "datasource": { "type": "prometheus", "uid": "prometheus" },
+                "targets": [
+                  {
+                    "expr": "sum by (queue) (broker_queue_consumer_count{job=\"messaging-service-metrics\"})",
+                    "legendFormat": "{{queue}}",
+                    "refId": "A"
+                  }
+                ],
+                "fieldConfig": { "defaults": { "unit": "short" } }
               },
               {
+                "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+                "title": "Messages Being Delivered",
+                "type": "timeseries",
                 "datasource": { "type": "prometheus", "uid": "prometheus" },
+                "targets": [
+                  {
+                    "expr": "sum by (queue) (broker_queue_delivering_count{job=\"messaging-service-metrics\"})",
+                    "legendFormat": "{{queue}}",
+                    "refId": "A"
+                  }
+                ],
+                "fieldConfig": { "defaults": { "unit": "short" } }
+              },
+              {
+                "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+                "title": "Queue Persistent Size",
+                "type": "timeseries",
+                "datasource": { "type": "prometheus", "uid": "prometheus" },
+                "targets": [
+                  {
+                    "expr": "sum by (queue) (broker_queue_persistent_size{job=\"messaging-service-metrics\"})",
+                    "legendFormat": "{{queue}}",
+                    "refId": "A"
+                  }
+                ],
+                "fieldConfig": { "defaults": { "unit": "bytes" } }
+              },
+              {
+                "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+                "title": "CPU Usage",
+                "type": "timeseries",
+                "datasource": { "type": "prometheus", "uid": "prometheus" },
+                "targets": [
+                  {
+                    "expr": "sum(rate(container_cpu_usage_seconds_total{pod=~\"messaging-service-ss-.\"}[5m]))",
+                    "refId": "A"
+                  }
+                ],
+                "fieldConfig": { "defaults": { "unit": "percentunit" } }
+              },
+              {
+                "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+                "title": "Memory Usage",
+                "type": "timeseries",
+                "datasource": { "type": "prometheus", "uid": "prometheus" },
+                "targets": [
+                  {
+                    "expr": "sum(container_memory_working_set_bytes{pod=~\"messaging-service-ss-.\"})",
+                    "refId": "A"
+                  }
+                ],
+                "fieldConfig": { "defaults": { "unit": "bytes" } }
+              },
+              {
+                "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+                "title": "Configured Queue Count",
+                "type": "stat",
+                "datasource": { "type": "prometheus", "uid": "prometheus" },
+                "targets": [
+                  {
+                    "expr": "count(broker_queue_message_count{job=\"messaging-service-metrics\"})",
+                    "refId": "A"
+                  }
+                ],
                 "fieldConfig": {
                   "defaults": {
-                    "color": { "mode": "palette-classic" },
-                    "custom": {
-                      "axisCenteredZero": false,
-                      "axisColorMode": "text",
-                      "axisLabel": "",
-                      "axisPlacement": "auto",
-                      "barAlignment": 0,
-                      "drawStyle": "line",
-                      "fillOpacity": 10,
-                      "gradientMode": "none",
-                      "hideFrom": { "tooltip": false, "viz": false, "legend": false },
-                      "lineInterpolation": "linear",
-                      "lineWidth": 1,
-                      "pointSize": 5,
-                      "scaleDistribution": { "type": "linear" },
-                      "showPoints": "never",
-                      "spanNulls": false,
-                      "stacking": { "group": "A", "mode": "none" },
-                      "thresholdsStyle": { "mode": "off" }
-                    },
-                    "mappings": [],
+                    "color": { "mode": "thresholds" },
                     "thresholds": {
                       "mode": "absolute",
-                      "steps": [{ "color": "green", "value": null }]
+                      "steps": [ { "color": "blue", "value": null } ]
                     },
                     "unit": "short"
-                  },
-                  "overrides": []
-                },
-                "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
-                "id": 3,
-                "options": {
-                  "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
-                  "tooltip": { "mode": "single", "sort": "none" }
-                },
-                "targets": [{
-                  "datasource": { "type": "prometheus", "uid": "prometheus" },
-                  "expr": "sum(broker_queue_delivering_count{job=\"messaging-service-metrics\"})",
-                  "refId": "A",
-                  "legendFormat": "Delivering"
-                }],
-                "title": "Messages Being Delivered",
-                "type": "timeseries"
-              },
-              {
-                "datasource": { "type": "prometheus", "uid": "prometheus" },
-                "fieldConfig": {
-                  "defaults": {
-                    "color": { "mode": "palette-classic" },
-                    "custom": {
-                      "axisCenteredZero": false,
-                      "axisColorMode": "text",
-                      "axisLabel": "",
-                      "axisPlacement": "auto",
-                      "barAlignment": 0,
-                      "drawStyle": "line",
-                      "fillOpacity": 10,
-                      "gradientMode": "none",
-                      "hideFrom": { "tooltip": false, "viz": false, "legend": false },
-                      "lineInterpolation": "linear",
-                      "lineWidth": 1,
-                      "pointSize": 5,
-                      "scaleDistribution": { "type": "linear" },
-                      "showPoints": "never",
-                      "spanNulls": false,
-                      "stacking": { "group": "A", "mode": "none" },
-                      "thresholdsStyle": { "mode": "off" }
-                    },
-                    "mappings": [],
-                    "thresholds": {
-                      "mode": "absolute",
-                      "steps": [{ "color": "green", "value": null }]
-                    },
-                    "unit": "bytes"
-                  },
-                  "overrides": []
-                },
-                "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
-                "id": 4,
-                "options": {
-                  "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
-                  "tooltip": { "mode": "single", "sort": "none" }
-                },
-                "targets": [{
-                  "datasource": { "type": "prometheus", "uid": "prometheus" },
-                  "expr": "sum(broker_queue_persistent_size{job=\"messaging-service-metrics\"})",
-                  "refId": "A",
-                  "legendFormat": "Disk Usage"
-                }],
-                "title": "Queue Persistent Size",
-                "type": "timeseries"
+                  }
+                }
               }
             ],
             "refresh": "5s",
@@ -915,28 +835,14 @@ kubeEtcd:
 kubeScheduler:
   enabled: false
 EOF
-```
 
-**Note:** This complete values file includes:
-- The initial Prometheus stack settings (sidecar configuration, disabled components)
-- The dashboard configuration with JMX exporter metrics:
-  - `broker_queue_message_count`: Total messages in all queues
-  - `broker_queue_consumer_count`: Number of active consumers
-  - `broker_queue_delivering_count`: Messages currently being delivered
-  - `broker_queue_persistent_size`: Disk space used by persistent messages
-
-### Apply Dashboard via Helm
-
-Now upgrade the Prometheus stack with the complete configuration:
-
-```bash {"stage":"grafana", "label":"apply dashboard via helm", "runtime":"bash"}
 helm upgrade prometheus prometheus-community/kube-prometheus-stack \
   -n service-app-project \
   -f grafana-complete-values.yaml \
   --wait
 ```
 
-**Important:** We do NOT use `--reuse-values` because it doesn't properly merge values files. Instead, we provide a complete values file that includes both the initial settings and the dashboard configuration.
+**Note:** The file creation and Helm upgrade are combined in one block so the file exists in the same shell context when Helm reads it. The dashboard uses `sum by (queue)` so each queue (`ORDERS.NEW`, `ORDERS.PROCESSED`, `ORDERS.SHIPPED`) appears as a separate series automatically — no dashboard changes are needed when new BrokerApps are added. Two new panels are also included: CPU Usage and Memory Usage for the broker pod, plus a Configured Queue Count stat panel.
 
 ### Restart Grafana to Load Dashboard
 
@@ -954,7 +860,12 @@ kubectl rollout status deployment/prometheus-grafana -n service-app-project --ti
 The kube-prometheus-stack includes Grafana with everything pre-configured. Access it using port-forwarding:
 
 ```bash {"stage":"grafana", "label":"port forward grafana", "runtime":"bash"}
-kubectl port-forward svc/prometheus-grafana -n service-app-project 3000:80
+pkill -f "port-forward svc/prometheus-grafana" 2>/dev/null || true
+sleep 1
+kubectl port-forward svc/prometheus-grafana \
+  -n service-app-project 3000:80 > /tmp/grafana-port-forward.log 2>&1 &
+sleep 3
+echo "Grafana available at http://localhost:3000"
 ```
 
 Then open your browser to: **http://localhost:3000**
@@ -1170,6 +1081,274 @@ You can test these queries in Grafana's Explore view:
 {__name__=~"broker_queue_.*", job="messaging-service-metrics"}
 ```
 
+## 8. Deploying a Second Application
+
+The `BrokerService` represents **shared messaging infrastructure**. Multiple applications can connect to the same `BrokerService` by creating additional `BrokerApp` resources. Each `BrokerApp` declares its own messaging requirements — the Operator automatically creates the required queues and assigns a unique connection port.
+
+After this section the broker topology becomes:
+
+```
+BrokerService: messaging-service
+        |
+        +------------------+
+        |                  |
+   first-app          second-app
+   ORDERS.NEW         ORDERS.SHIPPED   (producer + consumer)
+   ORDERS.PROCESSED   ORDERS.DELIVERED (producer + consumer)
+```
+
+Each `BrokerApp` owns its addresses independently — no address is shared between them. This is the correct pattern for the tutorial: two applications with separate queue lifecycles on the same `BrokerService`.
+
+### Create Second Application Certificate
+
+```bash {"stage":"deploy_second_app", "label":"create second app cert", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: second-app-app-cert
+  namespace: service-app-project
+spec:
+  secretName: second-app-app-cert
+  commonName: second-app
+  issuerRef:
+    name: broker-ca-issuer
+    kind: ClusterIssuer
+EOF
+```
+
+Wait for cert-manager to generate the TLS secret:
+
+```bash {"stage":"deploy_second_app", "label":"wait for second app cert", "runtime":"bash"}
+kubectl wait certificate second-app-app-cert \
+  -n service-app-project \
+  --for=condition=Ready \
+  --timeout=300s
+```
+
+### Deploy Second BrokerApp
+
+```bash {"stage":"deploy_second_app", "label":"deploy second brokerapp", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: broker.arkmq.org/v1beta2
+kind: BrokerApp
+metadata:
+  name: second-app
+  namespace: service-app-project
+spec:
+  selector:
+    matchLabels:
+      forWorkQueue: "true"
+  capabilities:
+    - consumerOf:
+        - address: "ORDERS.SHIPPED"
+      producerOf:
+        - address: "ORDERS.DELIVERED"
+        - address: "ORDERS.SHIPPED"
+EOF
+```
+
+Wait for the BrokerApp to be ready:
+
+```bash {"stage":"deploy_second_app", "label":"wait for second brokerapp", "runtime":"bash"}
+kubectl wait BrokerApp second-app \
+  -n service-app-project \
+  --for=condition=Ready \
+  --timeout=300s
+```
+
+Wait for the BrokerService to confirm both apps are provisioned (the operator rewrites the broker acceptor config and restarts the broker pod):
+
+```bash {"stage":"deploy_second_app", "label":"wait for brokerservice apps provisioned", "runtime":"bash"}
+kubectl wait BrokerService messaging-service -n service-app-project \
+  --for=condition=AppsProvisioned \
+  --timeout=300s
+```
+
+Wait for the broker pod to finish its config-reload restart:
+
+```bash {"stage":"deploy_second_app", "label":"wait for broker pod ready after second app", "runtime":"bash"}
+kubectl wait pod --selector=ActiveMQArtemis=messaging-service \
+  -n service-app-project \
+  --for=condition=Ready \
+  --timeout=300s
+```
+
+### Verify Port Assignment
+
+The Operator assigns a new unique port to `second-app`:
+
+```bash {"stage":"deploy_second_app", "label":"check second app port", "runtime":"bash"}
+kubectl get BrokerApp second-app \
+  -n service-app-project \
+  -o jsonpath='{.status.assignedPort}{"\n"}'
+```
+
+You should see a different port from `first-app`. The binding secret for `second-app` is also created automatically:
+
+```bash {"stage":"deploy_second_app", "label":"check second app binding secret", "runtime":"bash"}
+kubectl get secret second-app-binding-secret \
+  -n service-app-project \
+  -o jsonpath='{.data.uri}' | base64 -d && echo
+```
+
+### Deploy Second Camel Application
+
+Wait for the binding secret before deploying:
+
+```bash {"stage":"deploy_second_app", "label":"wait for second app binding secret", "runtime":"bash"}
+kubectl wait secret second-app-binding-secret \
+  -n service-app-project \
+  --for=create \
+  --timeout=300s
+```
+
+Create a separate PEM keystore secret for `second-app` — same content as `cert-pemcfg` but mounts `second-app-app-cert`:
+
+```bash {"stage":"deploy_second_app", "label":"create second app pemcfg secret", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cert-pemcfg-second
+  namespace: service-app-project
+type: Opaque
+stringData:
+  tls.pemcfg: |
+    source.key=/app/tls/client/tls.key
+    source.cert=/app/tls/client/tls.crt
+  java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
+EOF
+```
+
+```bash {"stage":"deploy_second_app", "label":"deploy second camel app", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: camel-jms-app-second
+  namespace: service-app-project
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: camel-jms-app-second
+  template:
+    metadata:
+      labels:
+        app: camel-jms-app-second
+    spec:
+      containers:
+      - name: camel-jms-app
+        image: quay.io/rh-ee-vnachiap/camel-jms-app:5.0.2
+        imagePullPolicy: Always
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+        env:
+        - name: BROKER_HOST
+          valueFrom:
+            secretKeyRef:
+              name: second-app-binding-secret
+              key: host
+        - name: BROKER_PORT
+          valueFrom:
+            secretKeyRef:
+              name: second-app-binding-secret
+              key: port
+        - name: PRODUCER_QUEUE
+          value: "ORDERS.DELIVERED"
+        - name: CONSUMER_QUEUE
+          value: "ORDERS.SHIPPED"
+        - name: CLIENT_USERNAME
+          value: "second-app"
+        - name: JDK_JAVA_OPTIONS
+          value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-3.0.0.jar:/deployments/lib/main/com.hierynomus.asn-one-0.6.0.jar:/deployments/lib/main/org.slf4j.slf4j-api-2.0.18.jar -Djava.security.properties=/app/tls/pem/java.security"
+        volumeMounts:
+        - name: trust
+          mountPath: /app/tls/ca
+          readOnly: true
+        - name: cert
+          mountPath: /app/tls/client
+          readOnly: true
+        - name: pem
+          mountPath: /app/tls/pem
+          readOnly: true
+      volumes:
+      - name: trust
+        secret:
+          secretName: arkmq-org-broker-manager-ca
+      - name: cert
+        secret:
+          secretName: second-app-app-cert
+      - name: pem
+        secret:
+          secretName: cert-pemcfg-second
+EOF
+```
+
+```bash {"stage":"deploy_second_app", "label":"rollout restart second camel to pick up correct port", "runtime":"bash"}
+kubectl rollout restart deployment/camel-jms-app-second -n service-app-project
+kubectl rollout status deployment/camel-jms-app-second -n service-app-project --timeout=120s
+```
+
+```bash {"stage":"deploy_second_app", "label":"wait for second camel app", "runtime":"bash"}
+kubectl wait deployment camel-jms-app-second -n service-app-project --for=condition=Available --timeout=300s
+```
+
+### Verify Second App Messaging
+
+```bash {"stage":"deploy_second_app", "label":"check second camel logs", "runtime":"bash"}
+kubectl logs -n service-app-project deployment/camel-jms-app-second --tail=50
+```
+
+You should see the same pattern as `camel-jms-app`: producer sending to `ORDERS.DELIVERED` and consumer receiving from `ORDERS.SHIPPED`.
+
+## 9. Observe the New Application in Grafana
+
+No changes are required to Prometheus or Grafana. The existing metrics pipeline automatically picks up the new queues:
+
+```
+Broker Metrics (port 8888)
+        |
+   Prometheus
+        |
+     Grafana
+```
+
+The dashboard queries use label selectors that cover all queues on the broker:
+
+```promql
+broker_queue_message_count{job="messaging-service-metrics"}
+```
+
+Within 30 seconds of `second-app` being provisioned, the **Queue Message Count** panel will show three separate queue series:
+
+| Label | Source |
+|---|---|
+| `queue="ORDERS.NEW"` | first-app consumer queue |
+| `queue="ORDERS.PROCESSED"` | first-app producer queue |
+| `queue="ORDERS.SHIPPED"` | second-app queue (producer + consumer) |
+| `queue="ORDERS.DELIVERED"` | second-app queue (producer + consumer) |
+
+**To verify in Grafana:**
+
+1. Open the **"Artemis Broker Metrics (JMX Exporter)"** dashboard
+2. In the **Queue Message Count** panel, click the legend — you should see all three queue labels
+3. Open **Explore** and run:
+
+```promql
+broker_queue_message_count{job="messaging-service-metrics"}
+```
+
+You should see separate time series for each queue with the `queue` label distinguishing them.
+
+**Key learning point:** Adding a `BrokerApp` changes the broker topology. No Prometheus or Grafana reconfiguration is needed — the dashboard automatically reflects the updated queue structure because it queries all queues on the broker, not a hardcoded list.
+
 ## Summary
 
 This tutorial demonstrated:
@@ -1179,6 +1358,8 @@ This tutorial demonstrated:
 3. ✅ **Camel application** reading dynamic connection details
 4. ✅ **Native Prometheus monitoring** using the default kube-prometheus-stack
 5. ✅ **Grafana visualization** with auto-discovered dashboards
+6. ✅ **Multi-application topology** — second BrokerApp sharing the same BrokerService
+7. ✅ **Automatic metrics discovery** — new queues appear in Grafana without reconfiguration
 
 **Key Takeaways:**
 
@@ -1188,17 +1369,21 @@ This tutorial demonstrated:
 - Dashboard ConfigMaps with `grafana_dashboard: "1"` label are automatically imported
 - Port-forwarding provides reliable access to Grafana on Minikube
 - BrokerApp enables developers to declare messaging needs without infrastructure knowledge
+- Multiple BrokerApps can share one BrokerService — each gets its own port and queue isolation
 
 ## Cleanup
 
 When you're finished, clean up the resources:
 
 ```bash
-# Delete the Camel application
-kubectl delete deployment camel-jms-app -n service-app-project
+# Delete the Camel applications
+kubectl delete deployment camel-jms-app camel-jms-app-second -n service-app-project
 
-# Delete the BrokerApp
-kubectl delete BrokerApp first-app -n service-app-project
+# Delete BrokerApps
+kubectl delete BrokerApp first-app second-app -n service-app-project
+
+# Delete PEM config secrets
+kubectl delete secret cert-pemcfg cert-pemcfg-second -n service-app-project
 
 # Delete the BrokerService
 kubectl delete BrokerService messaging-service -n service-app-project
@@ -1250,7 +1435,8 @@ Expected: Should show `release: prometheus` label. This is critical for the defa
 **5. Check Prometheus Targets**
 Access Prometheus via port-forward:
 ```bash
-kubectl port-forward svc/prometheus-kube-prometheus-prometheus -n service-app-project 9090:9090
+kubectl port-forward svc/prometheus-kube-prometheus-prometheus \
+  -n service-app-project 9090:9090 > /tmp/prometheus-port-forward.log 2>&1 &
 ```
 Then open http://localhost:9090/targets and verify:
 - Target `serviceMonitor/service-app-project/messaging-service-monitor/0` appears
