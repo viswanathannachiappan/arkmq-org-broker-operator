@@ -357,6 +357,12 @@ spec:
 EOF
 ```
 
+Wait for cert-manager to generate the `first-app-app-cert` secret before proceeding:
+
+```bash {"stage":"deploy_app", "label":"wait for app cert secret", "runtime":"bash"}
+kubectl wait secret first-app-app-cert -n service-app-project --for=create --timeout=300s
+```
+
 ### Deploy BrokerApp
 
 The `BrokerApp` connects to the `BrokerService` using label selectors and declares its messaging capabilities:
@@ -372,6 +378,8 @@ spec:
   selector:
     matchLabels:
       forWorkQueue: "true"
+  sharedAddresses:
+    - address: "ORDERS.PROCESSED"
   capabilities:
     - consumerOf:
         - address: "ORDERS.NEW"
@@ -393,6 +401,13 @@ Check the automatically assigned port:
 
 ```bash {"stage":"deploy_app", "label":"check port assignment", "runtime":"bash"}
 kubectl get BrokerApp first-app -n service-app-project -o jsonpath='{.status.assignedPort}{"\n"}'
+```
+
+Wait for the `BrokerService` to mark all apps provisioned (broker has reloaded TLS/JAAS config with the new app's credentials), then wait for the broker pod itself to be ready:
+
+```bash {"stage":"deploy_app", "label":"wait for apps provisioned", "runtime":"bash"}
+kubectl wait BrokerService messaging-service -n service-app-project --for=condition=AppsProvisioned --timeout=300s
+kubectl wait pod --selector=ActiveMQArtemis=messaging-service -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
 ## 5. Deploy Camel Quarkus Application
@@ -1139,6 +1154,8 @@ spec:
   selector:
     matchLabels:
       forWorkQueue: "true"
+  sharedAddresses:
+    - address: "ORDERS.DELIVERED"
   capabilities:
     - consumerOf:
         - address: "ORDERS.SHIPPED"
@@ -1308,7 +1325,437 @@ kubectl logs -n service-app-project deployment/camel-jms-app-second --tail=50
 
 You should see the same pattern as `camel-jms-app`: producer sending to `ORDERS.DELIVERED` and consumer receiving from `ORDERS.SHIPPED`.
 
-## 9. Observe the New Application in Grafana
+## 9. Deploying a Third Application
+
+The `BrokerService` can host as many `BrokerApp` resources as needed. Here we add a third application handling customer returns, introducing `ORDERS.CUSTOMERS` and `ORDERS.RETURNS` queues.
+
+After this section the broker topology becomes:
+
+```
+BrokerService: messaging-service
+        |
+        +-----------------+-----------------+
+        |                 |                 |
+   first-app         second-app         third-app
+   ORDERS.NEW        ORDERS.SHIPPED     ORDERS.CUSTOMERS
+   ORDERS.PROCESSED  ORDERS.DELIVERED   ORDERS.RETURNS
+```
+
+### Create Third Application Certificate
+
+```bash {"stage":"deploy_third_app", "label":"create third app cert", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: third-app-app-cert
+  namespace: service-app-project
+spec:
+  secretName: third-app-app-cert
+  commonName: third-app
+  issuerRef:
+    name: broker-ca-issuer
+    kind: ClusterIssuer
+EOF
+```
+
+Wait for cert-manager to generate the TLS secret:
+
+```bash {"stage":"deploy_third_app", "label":"wait for third app cert", "runtime":"bash"}
+kubectl wait certificate third-app-app-cert \
+  -n service-app-project \
+  --for=condition=Ready \
+  --timeout=300s
+```
+
+### Deploy Third BrokerApp
+
+```bash {"stage":"deploy_third_app", "label":"deploy third brokerapp", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: broker.arkmq.org/v1beta2
+kind: BrokerApp
+metadata:
+  name: third-app
+  namespace: service-app-project
+spec:
+  selector:
+    matchLabels:
+      forWorkQueue: "true"
+  sharedAddresses:
+    - address: "ORDERS.RETURNS"
+  capabilities:
+    - consumerOf:
+        - address: "ORDERS.CUSTOMERS"
+      producerOf:
+        - address: "ORDERS.RETURNS"
+        - address: "ORDERS.CUSTOMERS"
+EOF
+```
+
+Wait for the BrokerApp to be ready:
+
+```bash {"stage":"deploy_third_app", "label":"wait for third brokerapp", "runtime":"bash"}
+kubectl wait BrokerApp third-app \
+  -n service-app-project \
+  --for=condition=Ready \
+  --timeout=300s
+```
+
+Wait for the BrokerService to confirm all three apps are provisioned:
+
+```bash {"stage":"deploy_third_app", "label":"wait for brokerservice apps provisioned", "runtime":"bash"}
+kubectl wait BrokerService messaging-service -n service-app-project \
+  --for=condition=AppsProvisioned \
+  --timeout=300s
+```
+
+Wait for the broker pod to finish its config-reload restart:
+
+```bash {"stage":"deploy_third_app", "label":"wait for broker pod ready after third app", "runtime":"bash"}
+kubectl wait pod --selector=ActiveMQArtemis=messaging-service \
+  -n service-app-project \
+  --for=condition=Ready \
+  --timeout=300s
+```
+
+### Verify Port Assignment
+
+```bash {"stage":"deploy_third_app", "label":"check third app port", "runtime":"bash"}
+kubectl get BrokerApp third-app \
+  -n service-app-project \
+  -o jsonpath='{.status.assignedPort}{"\n"}'
+```
+
+### Deploy Third Camel Application
+
+Wait for the binding secret before deploying:
+
+```bash {"stage":"deploy_third_app", "label":"wait for third app binding secret", "runtime":"bash"}
+kubectl wait secret third-app-binding-secret \
+  -n service-app-project \
+  --for=create \
+  --timeout=300s
+```
+
+Create a separate PEM keystore secret for `third-app`:
+
+```bash {"stage":"deploy_third_app", "label":"create third app pemcfg secret", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cert-pemcfg-third
+  namespace: service-app-project
+type: Opaque
+stringData:
+  tls.pemcfg: |
+    source.key=/app/tls/client/tls.key
+    source.cert=/app/tls/client/tls.crt
+  java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
+EOF
+```
+
+```bash {"stage":"deploy_third_app", "label":"deploy third camel app", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: camel-jms-app-third
+  namespace: service-app-project
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: camel-jms-app-third
+  template:
+    metadata:
+      labels:
+        app: camel-jms-app-third
+    spec:
+      containers:
+      - name: camel-jms-app
+        image: quay.io/rh-ee-vnachiap/camel-jms-app:5.0.2
+        imagePullPolicy: Always
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+        env:
+        - name: BROKER_HOST
+          valueFrom:
+            secretKeyRef:
+              name: third-app-binding-secret
+              key: host
+        - name: BROKER_PORT
+          valueFrom:
+            secretKeyRef:
+              name: third-app-binding-secret
+              key: port
+        - name: PRODUCER_QUEUE
+          value: "ORDERS.RETURNS"
+        - name: CONSUMER_QUEUE
+          value: "ORDERS.CUSTOMERS"
+        - name: CLIENT_USERNAME
+          value: "third-app"
+        - name: JDK_JAVA_OPTIONS
+          value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-3.0.0.jar:/deployments/lib/main/com.hierynomus.asn-one-0.6.0.jar:/deployments/lib/main/org.slf4j.slf4j-api-2.0.18.jar -Djava.security.properties=/app/tls/pem/java.security"
+        volumeMounts:
+        - name: trust
+          mountPath: /app/tls/ca
+          readOnly: true
+        - name: cert
+          mountPath: /app/tls/client
+          readOnly: true
+        - name: pem
+          mountPath: /app/tls/pem
+          readOnly: true
+      volumes:
+      - name: trust
+        secret:
+          secretName: arkmq-org-broker-manager-ca
+      - name: cert
+        secret:
+          secretName: third-app-app-cert
+      - name: pem
+        secret:
+          secretName: cert-pemcfg-third
+EOF
+```
+
+```bash {"stage":"deploy_third_app", "label":"rollout restart third camel to pick up correct port", "runtime":"bash"}
+kubectl rollout restart deployment/camel-jms-app-third -n service-app-project
+kubectl rollout status deployment/camel-jms-app-third -n service-app-project --timeout=120s
+```
+
+```bash {"stage":"deploy_third_app", "label":"wait for third camel app", "runtime":"bash"}
+kubectl wait deployment camel-jms-app-third -n service-app-project --for=condition=Available --timeout=300s
+```
+
+### Verify Third App Messaging
+
+```bash {"stage":"deploy_third_app", "label":"check third camel logs", "runtime":"bash"}
+kubectl logs -n service-app-project deployment/camel-jms-app-third --tail=50
+```
+
+You should see the same pattern as the other Camel apps: producer sending to `ORDERS.RETURNS` and consumer receiving from `ORDERS.CUSTOMERS`.
+
+## 10. Draining Queues with a Master Sink Application
+
+While production enterprise systems split queue processing across specialized microservices, a single **Master Sink Application** can consume from multiple queues simultaneously. Because Camel routes in a sink application do not terminate with a `.to("jms:queue:...")` producer endpoint, the broker deletes each message upon receipt and acknowledgment — draining queue backlogs and freeing memory.
+
+The sink drains the three producer output queues:
+
+```
+ORDERS.PROCESSED  ←  drained by inventory-sink  (5 concurrent consumers)
+ORDERS.DELIVERED  ←  drained by drain-delivered  (5 concurrent consumers)
+ORDERS.RETURNS    ←  drained by drain-returns    (5 concurrent consumers)
+```
+
+### Create Master Sink Application Certificate
+
+```bash {"stage":"deploy_sink_app", "label":"create sink app cert", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: master-sink-app-cert
+  namespace: service-app-project
+spec:
+  secretName: master-sink-app-cert
+  commonName: master-sink-app
+  issuerRef:
+    name: broker-ca-issuer
+    kind: ClusterIssuer
+EOF
+```
+
+```bash {"stage":"deploy_sink_app", "label":"wait for sink app cert", "runtime":"bash"}
+kubectl wait certificate master-sink-app-cert \
+  -n service-app-project \
+  --for=condition=Ready \
+  --timeout=300s
+```
+
+Wait for cert-manager to generate the `master-sink-app-cert` secret before deploying the BrokerApp:
+
+```bash {"stage":"deploy_sink_app", "label":"wait for sink app cert secret", "runtime":"bash"}
+kubectl wait secret master-sink-app-cert \
+  -n service-app-project \
+  --for=create \
+  --timeout=300s
+```
+
+### Deploy Master Sink BrokerApp
+
+This grants `master-sink-app` consume permissions on `ORDERS.PROCESSED`, `ORDERS.DELIVERED`, and `ORDERS.RETURNS`:
+
+```bash {"stage":"deploy_sink_app", "label":"deploy sink brokerapp", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: broker.arkmq.org/v1beta2
+kind: BrokerApp
+metadata:
+  name: master-sink-app
+  namespace: service-app-project
+spec:
+  selector:
+    matchLabels:
+      forWorkQueue: "true"
+  capabilities:
+    - consumerOf:
+        - address: "ORDERS.PROCESSED"
+          appName: "first-app"
+          appNamespace: "service-app-project"
+        - address: "ORDERS.DELIVERED"
+          appName: "second-app"
+          appNamespace: "service-app-project"
+        - address: "ORDERS.RETURNS"
+          appName: "third-app"
+          appNamespace: "service-app-project"
+EOF
+```
+
+```bash {"stage":"deploy_sink_app", "label":"wait for sink brokerapp", "runtime":"bash"}
+kubectl wait BrokerApp master-sink-app \
+  -n service-app-project \
+  --for=condition=Ready \
+  --timeout=300s
+```
+
+```bash {"stage":"deploy_sink_app", "label":"wait for brokerservice apps provisioned", "runtime":"bash"}
+kubectl wait BrokerService messaging-service -n service-app-project \
+  --for=condition=AppsProvisioned \
+  --timeout=300s
+```
+
+```bash {"stage":"deploy_sink_app", "label":"wait for broker pod ready after sink app", "runtime":"bash"}
+kubectl wait pod --selector=ActiveMQArtemis=messaging-service \
+  -n service-app-project \
+  --for=condition=Ready \
+  --timeout=300s
+```
+
+### Deploy Master Sink Camel Application
+
+```bash {"stage":"deploy_sink_app", "label":"wait for sink app binding secret", "runtime":"bash"}
+kubectl wait secret master-sink-app-binding-secret \
+  -n service-app-project \
+  --for=create \
+  --timeout=300s
+```
+
+```bash {"stage":"deploy_sink_app", "label":"create sink app pemcfg secret", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cert-pemcfg-sink
+  namespace: service-app-project
+type: Opaque
+stringData:
+  tls.pemcfg: |
+    source.key=/app/tls/client/tls.key
+    source.cert=/app/tls/client/tls.crt
+  java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
+EOF
+```
+
+```bash {"stage":"deploy_sink_app", "label":"deploy sink camel app", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: camel-jms-master-sink
+  namespace: service-app-project
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: camel-jms-master-sink
+  template:
+    metadata:
+      labels:
+        app: camel-jms-master-sink
+    spec:
+      containers:
+      - name: camel-jms-app
+        image: quay.io/rh-ee-vnachiap/camel-jms-app:master-sink-1.0
+        imagePullPolicy: Always
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+        env:
+        - name: BROKER_HOST
+          valueFrom:
+            secretKeyRef:
+              name: master-sink-app-binding-secret
+              key: host
+        - name: BROKER_PORT
+          valueFrom:
+            secretKeyRef:
+              name: master-sink-app-binding-secret
+              key: port
+        - name: CLIENT_USERNAME
+          value: "master-sink-app"
+        - name: CONSUMER_QUEUE
+          value: "ORDERS.PROCESSED,ORDERS.DELIVERED,ORDERS.RETURNS"
+        - name: JDK_JAVA_OPTIONS
+          value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-3.0.0.jar:/deployments/lib/main/com.hierynomus.asn-one-0.6.0.jar:/deployments/lib/main/org.slf4j.slf4j-api-2.0.18.jar -Djava.security.properties=/app/tls/pem/java.security"
+        volumeMounts:
+        - name: trust
+          mountPath: /app/tls/ca
+          readOnly: true
+        - name: cert
+          mountPath: /app/tls/client
+          readOnly: true
+        - name: pem
+          mountPath: /app/tls/pem
+          readOnly: true
+      volumes:
+      - name: trust
+        secret:
+          secretName: arkmq-org-broker-manager-ca
+      - name: cert
+        secret:
+          secretName: master-sink-app-cert
+      - name: pem
+        secret:
+          secretName: cert-pemcfg-sink
+EOF
+```
+
+```bash {"stage":"deploy_sink_app", "label":"rollout restart sink camel to pick up correct port", "runtime":"bash"}
+kubectl rollout restart deployment/camel-jms-master-sink -n service-app-project
+kubectl rollout status deployment/camel-jms-master-sink -n service-app-project --timeout=120s
+```
+
+```bash {"stage":"deploy_sink_app", "label":"wait for sink camel app", "runtime":"bash"}
+kubectl wait deployment camel-jms-master-sink -n service-app-project --for=condition=Available --timeout=300s
+```
+
+### Verify Master Sink Messaging
+
+```bash {"stage":"deploy_sink_app", "label":"check sink camel logs", "runtime":"bash"}
+kubectl logs -n service-app-project deployment/camel-jms-master-sink --tail=50
+```
+
+You should see all three drain routes consuming simultaneously:
+- `drain-processed` logging `Cleaned up message from ORDERS.PROCESSED`
+- `drain-delivered` logging `Cleaned up message from ORDERS.DELIVERED`
+- `drain-returns` logging `Cleaned up message from ORDERS.RETURNS`
+
+Once the sink is running, observe the following changes in Grafana:
+- **Queue Message Count** for `ORDERS.PROCESSED`, `ORDERS.DELIVERED`, `ORDERS.RETURNS` drops rapidly toward zero
+- **Queue Consumer Count** increases as the sink adds 5 concurrent consumers per queue
+- **Queue Persistent Size** decreases as messages are purged
+
+## 11. Observe All Applications in Grafana
 
 No changes are required to Prometheus or Grafana. The existing metrics pipeline automatically picks up the new queues:
 
@@ -1349,7 +1796,7 @@ You should see separate time series for each queue with the `queue` label distin
 
 **Key learning point:** Adding a `BrokerApp` changes the broker topology. No Prometheus or Grafana reconfiguration is needed — the dashboard automatically reflects the updated queue structure because it queries all queues on the broker, not a hardcoded list.
 
-## Summary
+## 11. Summary
 
 This tutorial demonstrated:
 
@@ -1377,13 +1824,13 @@ When you're finished, clean up the resources:
 
 ```bash
 # Delete the Camel applications
-kubectl delete deployment camel-jms-app camel-jms-app-second -n service-app-project
+kubectl delete deployment camel-jms-app camel-jms-app-second camel-jms-app-third -n service-app-project
 
 # Delete BrokerApps
-kubectl delete BrokerApp first-app second-app -n service-app-project
+kubectl delete BrokerApp first-app second-app third-app -n service-app-project
 
 # Delete PEM config secrets
-kubectl delete secret cert-pemcfg cert-pemcfg-second -n service-app-project
+kubectl delete secret cert-pemcfg cert-pemcfg-second cert-pemcfg-third -n service-app-project
 
 # Delete the BrokerService
 kubectl delete BrokerService messaging-service -n service-app-project
