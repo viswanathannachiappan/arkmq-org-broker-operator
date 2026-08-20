@@ -22,19 +22,19 @@ This tutorial deploys a realistic event-driven order-processing pipeline and sho
                                  ▼
                           ORDERS.NEW
                                  │
-                          first-app
+                       order-processor-app
                           Order Processor
                                  │
                                  ▼
                        ORDERS.PROCESSED
                                  │
-                          second-app
+                       shipping-service-app
                           Shipping Service
                                  │
                                  ▼
                         ORDERS.SHIPPED
                                  │
-                          third-app
+                       delivery-service-app
                           Delivery Service
                                  │
                                  ▼
@@ -55,11 +55,11 @@ Role and queue configuration come from environment variables.
 | Kubernetes Deployment | BrokerApp identity | `APP_ROLE` | Consumes | Produces |
 |---|---|---|---|---|
 | order-generator | `order-generator` | `generator` | — | `ORDERS.NEW` |
-| camel-jms-app | `first-app` | `processor` | `ORDERS.NEW` | `ORDERS.PROCESSED` |
-| camel-jms-app-second | `second-app` | `shipping` | `ORDERS.PROCESSED` | `ORDERS.SHIPPED` |
-| camel-jms-app-third | `third-app` | `delivery` | `ORDERS.SHIPPED` | `ORDERS.DELIVERED` |
+| order-processor-app | `order-processor-app` | `processor` | `ORDERS.NEW` | `ORDERS.PROCESSED` |
+| shipping-service-app | `shipping-service-app` | `shipping` | `ORDERS.PROCESSED` | `ORDERS.SHIPPED` |
+| delivery-service-app | `delivery-service-app` | `delivery` | `ORDERS.SHIPPED` | `ORDERS.DELIVERED` |
 
-The BrokerApp identity (column 2) is what Artemis uses for access control. The Kubernetes Deployment name is what `kubectl` uses. These are intentionally different so the tutorial's operational commands are unambiguous.
+The Kubernetes Deployment name and BrokerApp identity are the same — the business service name — so every `kubectl` command and every Artemis access-control identity uses the same name throughout.
 
 ### Prerequisites
 
@@ -309,8 +309,8 @@ kubectl wait BrokerService messaging-service -n service-app-project --for=condit
 Each `BrokerApp` declares exactly the permissions its pipeline stage needs. The ownership chain is:
 
 ```
-order-generator  →  ORDERS.NEW  →  first-app  →  ORDERS.PROCESSED  →  second-app  →  ORDERS.SHIPPED  →  third-app  →  ORDERS.DELIVERED
-   (produce)          (consume/produce)                (consume/produce)                  (consume/produce)
+order-generator  →  ORDERS.NEW  →  order-processor-app  →  ORDERS.PROCESSED  →  shipping-service-app  →  ORDERS.SHIPPED  →  delivery-service-app  →  ORDERS.DELIVERED
+   (produce)              (consume/produce)                       (consume/produce)                              (consume/produce)
 ```
 
 Each app only owns the addresses it **produces**. Downstream consumers reference upstream producers using `appName` + `appNamespace`.
@@ -362,34 +362,34 @@ EOF
 kubectl wait BrokerApp order-generator -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
-#### first-app (Order Processor)
+#### order-processor-app (Order Processor)
 
-```bash {"stage":"deploy_app", "label":"create first-app cert", "runtime":"bash"}
+```bash {"stage":"deploy_app", "label":"create order-processor-app cert", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: first-app-app-cert
+  name: order-processor-app-cert
   namespace: service-app-project
 spec:
-  secretName: first-app-app-cert
-  commonName: first-app
+  secretName: order-processor-app-cert
+  commonName: order-processor-app
   issuerRef:
     name: broker-ca-issuer
     kind: ClusterIssuer
 EOF
 ```
 
-```bash {"stage":"deploy_app", "label":"wait for first-app cert", "runtime":"bash"}
-kubectl wait certificate first-app-app-cert -n service-app-project --for=condition=Ready --timeout=300s
+```bash {"stage":"deploy_app", "label":"wait for order-processor-app cert", "runtime":"bash"}
+kubectl wait certificate order-processor-app-cert -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
-```bash {"stage":"deploy_app", "label":"deploy first-app brokerapp", "runtime":"bash"}
+```bash {"stage":"deploy_app", "label":"deploy order-processor-app brokerapp", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: broker.arkmq.org/v1beta2
 kind: BrokerApp
 metadata:
-  name: first-app
+  name: order-processor-app
   namespace: service-app-project
 spec:
   selector:
@@ -407,38 +407,38 @@ spec:
 EOF
 ```
 
-```bash {"stage":"deploy_app", "label":"wait for first-app brokerapp", "runtime":"bash"}
-kubectl wait BrokerApp first-app -n service-app-project --for=condition=Ready --timeout=300s
+```bash {"stage":"deploy_app", "label":"wait for order-processor-app brokerapp", "runtime":"bash"}
+kubectl wait BrokerApp order-processor-app -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
-#### second-app (Shipping Service)
+#### shipping-service-app (Shipping Service)
 
-```bash {"stage":"deploy_app", "label":"create second-app cert", "runtime":"bash"}
+```bash {"stage":"deploy_app", "label":"create shipping-service-app cert", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: second-app-app-cert
+  name: shipping-service-app-cert
   namespace: service-app-project
 spec:
-  secretName: second-app-app-cert
-  commonName: second-app
+  secretName: shipping-service-app-cert
+  commonName: shipping-service-app
   issuerRef:
     name: broker-ca-issuer
     kind: ClusterIssuer
 EOF
 ```
 
-```bash {"stage":"deploy_app", "label":"wait for second-app cert", "runtime":"bash"}
-kubectl wait certificate second-app-app-cert -n service-app-project --for=condition=Ready --timeout=300s
+```bash {"stage":"deploy_app", "label":"wait for shipping-service-app cert", "runtime":"bash"}
+kubectl wait certificate shipping-service-app-cert -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
-```bash {"stage":"deploy_app", "label":"deploy second-app brokerapp", "runtime":"bash"}
+```bash {"stage":"deploy_app", "label":"deploy shipping-service-app brokerapp", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: broker.arkmq.org/v1beta2
 kind: BrokerApp
 metadata:
-  name: second-app
+  name: shipping-service-app
   namespace: service-app-project
 spec:
   selector:
@@ -449,45 +449,45 @@ spec:
   capabilities:
     - consumerOf:
         - address: "ORDERS.PROCESSED"
-          appName: "first-app"
+          appName: "order-processor-app"
           appNamespace: "service-app-project"
       producerOf:
         - address: "ORDERS.SHIPPED"
 EOF
 ```
 
-```bash {"stage":"deploy_app", "label":"wait for second-app brokerapp", "runtime":"bash"}
-kubectl wait BrokerApp second-app -n service-app-project --for=condition=Ready --timeout=300s
+```bash {"stage":"deploy_app", "label":"wait for shipping-service-app brokerapp", "runtime":"bash"}
+kubectl wait BrokerApp shipping-service-app -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
-#### third-app (Delivery Service)
+#### delivery-service-app (Delivery Service)
 
-```bash {"stage":"deploy_app", "label":"create third-app cert", "runtime":"bash"}
+```bash {"stage":"deploy_app", "label":"create delivery-service-app cert", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: third-app-app-cert
+  name: delivery-service-app-cert
   namespace: service-app-project
 spec:
-  secretName: third-app-app-cert
-  commonName: third-app
+  secretName: delivery-service-app-cert
+  commonName: delivery-service-app
   issuerRef:
     name: broker-ca-issuer
     kind: ClusterIssuer
 EOF
 ```
 
-```bash {"stage":"deploy_app", "label":"wait for third-app cert", "runtime":"bash"}
-kubectl wait certificate third-app-app-cert -n service-app-project --for=condition=Ready --timeout=300s
+```bash {"stage":"deploy_app", "label":"wait for delivery-service-app cert", "runtime":"bash"}
+kubectl wait certificate delivery-service-app-cert -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
-```bash {"stage":"deploy_app", "label":"deploy third-app brokerapp", "runtime":"bash"}
+```bash {"stage":"deploy_app", "label":"deploy delivery-service-app brokerapp", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: broker.arkmq.org/v1beta2
 kind: BrokerApp
 metadata:
-  name: third-app
+  name: delivery-service-app
   namespace: service-app-project
 spec:
   selector:
@@ -498,15 +498,15 @@ spec:
   capabilities:
     - consumerOf:
         - address: "ORDERS.SHIPPED"
-          appName: "second-app"
+          appName: "shipping-service-app"
           appNamespace: "service-app-project"
       producerOf:
         - address: "ORDERS.DELIVERED"
 EOF
 ```
 
-```bash {"stage":"deploy_app", "label":"wait for third-app brokerapp", "runtime":"bash"}
-kubectl wait BrokerApp third-app -n service-app-project --for=condition=Ready --timeout=300s
+```bash {"stage":"deploy_app", "label":"wait for delivery-service-app brokerapp", "runtime":"bash"}
+kubectl wait BrokerApp delivery-service-app -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
 #### master-sink (Optional operational drain)
@@ -549,7 +549,7 @@ spec:
   capabilities:
     - consumerOf:
         - address: "ORDERS.DELIVERED"
-          appName: "third-app"
+          appName: "delivery-service-app"
           appNamespace: "service-app-project"
 EOF
 ```
@@ -682,23 +682,13 @@ kubectl get brokerapp -n service-app-project \
   -o custom-columns='NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status,PORT:.status.service.assignedPort,SECRET:.status.service.secret'
 ```
 
-Expected output:
-
-```
-NAME              READY   PORT    SECRET
-first-app         True    61617   first-app-binding-secret
-order-generator   True    61618   order-generator-binding-secret
-second-app        True    61619   second-app-binding-secret
-third-app         True    61620   third-app-binding-secret
-```
-
 Then confirm the secrets exist:
 
 ```bash {"stage":"deploy_app", "label":"verify binding secrets", "runtime":"bash"}
 kubectl get secret -n service-app-project | grep binding-secret
 ```
 
-You should see `order-generator-binding-secret`, `first-app-binding-secret`, `second-app-binding-secret`, and `third-app-binding-secret` before proceeding to deploy the Camel applications.
+You should see `order-generator-binding-secret`, `order-processor-app-binding-secret`, `shipping-service-app-binding-secret`, and `delivery-service-app-binding-secret` before proceeding to deploy the Camel applications.
 
 ---
 
@@ -728,7 +718,7 @@ Each deployment mounts its own app certificate at `/app/tls/client`. All four de
 
 ### order-generator
 
-Produces 25 realistic order JSON messages per second into `ORDERS.NEW`. The generator has its own `BrokerApp` identity (`order-generator`) with a single `producerOf: ORDERS.NEW` capability. This enforces least-privilege: `first-app` cannot send to `ORDERS.NEW` and `order-generator` cannot consume from it.
+Produces 5 realistic order JSON messages per second into `ORDERS.NEW`. The generator has its own `BrokerApp` identity (`order-generator`) with a single `producerOf: ORDERS.NEW` capability.
 
 Wait for the `order-generator` binding secret before deploying:
 
@@ -830,18 +820,18 @@ EOF
 kubectl wait deployment order-generator -n service-app-project --for=condition=Available --timeout=300s
 ```
 
-### camel-jms-app (Order Processor — first-app)
+### order-processor-app (Order Processor)
 
-```bash {"stage":"deploy_camel", "label":"wait for first-app binding secret", "runtime":"bash"}
-kubectl wait secret first-app-binding-secret -n service-app-project --for=create --timeout=300s
+```bash {"stage":"deploy_camel", "label":"wait for order-processor-app binding secret", "runtime":"bash"}
+kubectl wait secret order-processor-app-binding-secret -n service-app-project --for=create --timeout=300s
 ```
 
-```bash {"stage":"deploy_camel", "label":"create first-app pemcfg", "runtime":"bash"}
+```bash {"stage":"deploy_camel", "label":"create order-processor-app pemcfg", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Secret
 metadata:
-  name: cert-pemcfg-first
+  name: cert-pemcfg-order-processor
   namespace: service-app-project
 type: Opaque
 stringData:
@@ -852,22 +842,22 @@ stringData:
 EOF
 ```
 
-```bash {"stage":"deploy_camel", "label":"deploy camel-jms-app", "runtime":"bash"}
+```bash {"stage":"deploy_camel", "label":"deploy order-processor-app", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: camel-jms-app
+  name: order-processor-app
   namespace: service-app-project
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: camel-jms-app
+      app: order-processor-app
   template:
     metadata:
       labels:
-        app: camel-jms-app
+        app: order-processor-app
     spec:
       containers:
       - name: camel-jms-app
@@ -884,15 +874,15 @@ spec:
         - name: BROKER_HOST
           valueFrom:
             secretKeyRef:
-              name: first-app-binding-secret
+              name: order-processor-app-binding-secret
               key: host
         - name: BROKER_PORT
           valueFrom:
             secretKeyRef:
-              name: first-app-binding-secret
+              name: order-processor-app-binding-secret
               key: port
         - name: CLIENT_USERNAME
-          value: "first-app"
+          value: "order-processor-app"
         - name: APP_ROLE
           value: "processor"
         - name: CONSUMER_QUEUE
@@ -922,25 +912,25 @@ spec:
           secretName: arkmq-org-broker-manager-ca
       - name: cert
         secret:
-          secretName: first-app-app-cert
+          secretName: order-processor-app-cert
       - name: pem
         secret:
-          secretName: cert-pemcfg-first
+          secretName: cert-pemcfg-order-processor
 EOF
 ```
 
-```bash {"stage":"deploy_camel", "label":"wait for camel-jms-app", "runtime":"bash"}
-kubectl wait deployment camel-jms-app -n service-app-project --for=condition=Available --timeout=300s
+```bash {"stage":"deploy_camel", "label":"wait for order-processor-app", "runtime":"bash"}
+kubectl wait deployment order-processor-app -n service-app-project --for=condition=Available --timeout=300s
 ```
 
-### camel-jms-app-second (Shipping Service — second-app)
+### shipping-service-app (Shipping Service)
 
-```bash {"stage":"deploy_camel", "label":"create second-app pemcfg", "runtime":"bash"}
+```bash {"stage":"deploy_camel", "label":"create shipping-service-app pemcfg", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Secret
 metadata:
-  name: cert-pemcfg-second
+  name: cert-pemcfg-shipping-service
   namespace: service-app-project
 type: Opaque
 stringData:
@@ -951,26 +941,26 @@ stringData:
 EOF
 ```
 
-```bash {"stage":"deploy_camel", "label":"wait for second-app binding secret", "runtime":"bash"}
-kubectl wait secret second-app-binding-secret -n service-app-project --for=create --timeout=300s
+```bash {"stage":"deploy_camel", "label":"wait for shipping-service-app binding secret", "runtime":"bash"}
+kubectl wait secret shipping-service-app-binding-secret -n service-app-project --for=create --timeout=300s
 ```
 
-```bash {"stage":"deploy_camel", "label":"deploy camel-jms-app-second", "runtime":"bash"}
+```bash {"stage":"deploy_camel", "label":"deploy shipping-service-app", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: camel-jms-app-second
+  name: shipping-service-app
   namespace: service-app-project
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: camel-jms-app-second
+      app: shipping-service-app
   template:
     metadata:
       labels:
-        app: camel-jms-app-second
+        app: shipping-service-app
     spec:
       containers:
       - name: camel-jms-app
@@ -987,15 +977,15 @@ spec:
         - name: BROKER_HOST
           valueFrom:
             secretKeyRef:
-              name: second-app-binding-secret
+              name: shipping-service-app-binding-secret
               key: host
         - name: BROKER_PORT
           valueFrom:
             secretKeyRef:
-              name: second-app-binding-secret
+              name: shipping-service-app-binding-secret
               key: port
         - name: CLIENT_USERNAME
-          value: "second-app"
+          value: "shipping-service-app"
         - name: APP_ROLE
           value: "shipping"
         - name: CONSUMER_QUEUE
@@ -1025,26 +1015,25 @@ spec:
           secretName: arkmq-org-broker-manager-ca
       - name: cert
         secret:
-          secretName: second-app-app-cert
+          secretName: shipping-service-app-cert
       - name: pem
         secret:
-          secretName: cert-pemcfg-second
+          secretName: cert-pemcfg-shipping-service
 EOF
 ```
 
-```bash {"stage":"deploy_camel", "label":"wait for camel-jms-app-second", "runtime":"bash"}
-kubectl rollout status deployment/camel-jms-app-second -n service-app-project --timeout=120s
-kubectl wait deployment camel-jms-app-second -n service-app-project --for=condition=Available --timeout=300s
+```bash {"stage":"deploy_camel", "label":"wait for shipping-service-app", "runtime":"bash"}
+kubectl wait deployment shipping-service-app -n service-app-project --for=condition=Available --timeout=300s
 ```
 
-### camel-jms-app-third (Delivery Service — third-app)
+### delivery-service-app (Delivery Service)
 
-```bash {"stage":"deploy_camel", "label":"create third-app pemcfg", "runtime":"bash"}
+```bash {"stage":"deploy_camel", "label":"create delivery-service-app pemcfg", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Secret
 metadata:
-  name: cert-pemcfg-third
+  name: cert-pemcfg-delivery-service
   namespace: service-app-project
 type: Opaque
 stringData:
@@ -1055,26 +1044,26 @@ stringData:
 EOF
 ```
 
-```bash {"stage":"deploy_camel", "label":"wait for third-app binding secret", "runtime":"bash"}
-kubectl wait secret third-app-binding-secret -n service-app-project --for=create --timeout=300s
+```bash {"stage":"deploy_camel", "label":"wait for delivery-service-app binding secret", "runtime":"bash"}
+kubectl wait secret delivery-service-app-binding-secret -n service-app-project --for=create --timeout=300s
 ```
 
-```bash {"stage":"deploy_camel", "label":"deploy camel-jms-app-third", "runtime":"bash"}
+```bash {"stage":"deploy_camel", "label":"deploy delivery-service-app", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: camel-jms-app-third
+  name: delivery-service-app
   namespace: service-app-project
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: camel-jms-app-third
+      app: delivery-service-app
   template:
     metadata:
       labels:
-        app: camel-jms-app-third
+        app: delivery-service-app
     spec:
       containers:
       - name: camel-jms-app
@@ -1091,15 +1080,15 @@ spec:
         - name: BROKER_HOST
           valueFrom:
             secretKeyRef:
-              name: third-app-binding-secret
+              name: delivery-service-app-binding-secret
               key: host
         - name: BROKER_PORT
           valueFrom:
             secretKeyRef:
-              name: third-app-binding-secret
+              name: delivery-service-app-binding-secret
               key: port
         - name: CLIENT_USERNAME
-          value: "third-app"
+          value: "delivery-service-app"
         - name: APP_ROLE
           value: "delivery"
         - name: CONSUMER_QUEUE
@@ -1110,7 +1099,7 @@ spec:
           value: "25"
         - name: CONSUMER_CONCURRENCY
           value: "1"
-        # Throughput: 1 consumer / 0.025 s = ~40 msg/s — above the 25 msg/s generator rate.
+        # Throughput: 1 consumer / 0.025 s = ~40 msg/s — 8x headroom above the 5 msg/s generator rate.
         - name: JDK_JAVA_OPTIONS
           value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-3.0.0.jar:/deployments/lib/main/com.hierynomus.asn-one-0.6.0.jar:/deployments/lib/main/org.slf4j.slf4j-api-2.0.18.jar -Djava.security.properties=/app/tls/pem/java.security"
         volumeMounts:
@@ -1129,16 +1118,15 @@ spec:
           secretName: arkmq-org-broker-manager-ca
       - name: cert
         secret:
-          secretName: third-app-app-cert
+          secretName: delivery-service-app-cert
       - name: pem
         secret:
-          secretName: cert-pemcfg-third
+          secretName: cert-pemcfg-delivery-service
 EOF
 ```
 
-```bash {"stage":"deploy_camel", "label":"wait for camel-jms-app-third", "runtime":"bash"}
-kubectl rollout status deployment/camel-jms-app-third -n service-app-project --timeout=120s
-kubectl wait deployment camel-jms-app-third -n service-app-project --for=condition=Available --timeout=300s
+```bash {"stage":"deploy_camel", "label":"wait for delivery-service-app", "runtime":"bash"}
+kubectl wait deployment delivery-service-app -n service-app-project --for=condition=Available --timeout=300s
 ```
 
 ### Verify the Pipeline
@@ -1150,15 +1138,15 @@ kubectl logs -n service-app-project deployment/order-generator --tail=20
 ```
 
 ```bash {"stage":"verify", "label":"check processor logs", "runtime":"bash"}
-kubectl logs -n service-app-project deployment/camel-jms-app --tail=20
+kubectl logs -n service-app-project deployment/order-processor-app --tail=20
 ```
 
 ```bash {"stage":"verify", "label":"check shipping logs", "runtime":"bash"}
-kubectl logs -n service-app-project deployment/camel-jms-app-second --tail=20
+kubectl logs -n service-app-project deployment/shipping-service-app --tail=20
 ```
 
 ```bash {"stage":"verify", "label":"check delivery logs", "runtime":"bash"}
-kubectl logs -n service-app-project deployment/camel-jms-app-third --tail=20
+kubectl logs -n service-app-project deployment/delivery-service-app --tail=20
 ```
 
 You should see log lines like:
@@ -1434,7 +1422,7 @@ grafana:
               {
                 "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
                 "title": "Consumer Count per Queue",
-                "description": "Scale camel-jms-app-second and watch the consumer count for ORDERS.PROCESSED increase.",
+                "description": "Scale shipping-service-app and watch the consumer count for ORDERS.PROCESSED increase.",
                 "type": "timeseries",
                 "datasource": { "type": "prometheus", "uid": "prometheus" },
                 "targets": [
@@ -1511,9 +1499,9 @@ Under normal conditions (5 msg/s, all consumers healthy) you should see:
 
 | Deployment | `CONSUMER_CONCURRENCY` | JMS consumers |
 |---|---|---|
-| camel-jms-app (`first-app`) | 1 | 1 |
-| camel-jms-app-second (`second-app`) | 1 | 1 |
-| camel-jms-app-third (`third-app`) | 1 | 1 |
+| order-processor-app | 1 | 1 |
+| shipping-service-app | 1 | 1 |
+| delivery-service-app | 1 | 1 |
 | **Total** | | **3** |
 
 > **Note:** This assumes all configured JMS sessions are connected. Verify the actual count in Prometheus by searching for `broker_queue_consumer_count` and inspecting the `queue` and `job` labels.
@@ -1559,10 +1547,10 @@ kubectl scale deployment camel-jms-master-sink --replicas=1 -n service-app-proje
 Increase the shipping processing delay to make it the bottleneck:
 
 ```bash {"stage":"scenario_bottleneck", "label":"slow down shipping", "runtime":"bash"}
-kubectl set env deployment/camel-jms-app-second \
+kubectl set env deployment/shipping-service-app \
   PROCESSING_DELAY_MS=2000 \
   -n service-app-project
-kubectl rollout status deployment/camel-jms-app-second -n service-app-project --timeout=120s
+kubectl rollout status deployment/shipping-service-app -n service-app-project --timeout=120s
 ```
 
 With `PROCESSING_DELAY_MS=2000` and `CONSUMER_CONCURRENCY=1`, the shipping service can process at most **0.5 msg/s** (theoretical). The generator is still producing 5 msg/s. Under idealized conditions `ORDERS.PROCESSED` should accumulate at roughly **4.5 messages per second** (5 − 0.5). The actual rate depends on JMS overhead and scheduling, but the growth will be clearly visible in Grafana within seconds.
@@ -1587,10 +1575,10 @@ The `Queue Depth per Stage` panel shows `ORDERS.PROCESSED` climbing while the ot
 Scale the shipping deployment to five replicas:
 
 ```bash {"stage":"scenario_scale", "label":"scale up shipping", "runtime":"bash"}
-kubectl scale deployment camel-jms-app-second \
+kubectl scale deployment shipping-service-app \
   --replicas=5 \
   -n service-app-project
-kubectl wait deployment camel-jms-app-second \
+kubectl wait deployment shipping-service-app \
   -n service-app-project \
   --for=condition=Available \
   --timeout=300s
@@ -1599,10 +1587,10 @@ kubectl wait deployment camel-jms-app-second \
 Scaling gives you five consumers, but they still have the 2-second processing delay — so aggregate throughput is still only ~2.5 msg/s at this point. The next step restores the 25 ms delay; after that rollout completes, aggregate theoretical capacity rises to ~200 msg/s, far exceeding the 5 msg/s input rate, and the backlog clears quickly:
 
 ```bash {"stage":"scenario_scale", "label":"reset shipping delay", "runtime":"bash"}
-kubectl set env deployment/camel-jms-app-second \
+kubectl set env deployment/shipping-service-app \
   PROCESSING_DELAY_MS=25 \
   -n service-app-project
-kubectl rollout status deployment/camel-jms-app-second -n service-app-project --timeout=120s
+kubectl rollout status deployment/shipping-service-app -n service-app-project --timeout=120s
 ```
 
 After the scale-up and delay reset, the updated consumer counts are:
@@ -1647,16 +1635,16 @@ That is the complete demonstration of why BrokerService and real-time monitoring
 pkill -f "port-forward" 2>/dev/null || true
 
 # Delete Camel deployments
-kubectl delete deployment order-generator camel-jms-app camel-jms-app-second camel-jms-app-third -n service-app-project
+kubectl delete deployment order-generator order-processor-app shipping-service-app delivery-service-app -n service-app-project
 
 # Delete Camel sink deployment (if it was scaled up)
 kubectl delete deployment camel-jms-master-sink -n service-app-project 2>/dev/null || true
 
 # Delete BrokerApps
-kubectl delete BrokerApp order-generator first-app second-app third-app master-sink-app -n service-app-project
+kubectl delete BrokerApp order-generator order-processor-app shipping-service-app delivery-service-app master-sink-app -n service-app-project
 
 # Delete PEM config secrets
-kubectl delete secret cert-pemcfg cert-pemcfg-generator cert-pemcfg-first cert-pemcfg-second cert-pemcfg-third cert-pemcfg-sink -n service-app-project
+kubectl delete secret cert-pemcfg cert-pemcfg-generator cert-pemcfg-order-processor cert-pemcfg-shipping-service cert-pemcfg-delivery-service cert-pemcfg-sink -n service-app-project
 
 # Delete the BrokerService
 kubectl delete BrokerService messaging-service -n service-app-project
@@ -1762,11 +1750,11 @@ kubectl get deployment -n service-app-project
 
 **Check for connection errors in any Camel pod:**
 ```bash
-kubectl logs -n service-app-project deployment/camel-jms-app --tail=30 | grep -i error
+kubectl logs -n service-app-project deployment/order-processor-app --tail=30 | grep -i error
 ```
 
 **Verify binding secrets were created:**
 ```bash
 kubectl get secret -n service-app-project | grep binding-secret
 ```
-You should see `order-generator-binding-secret`, `first-app-binding-secret`, `second-app-binding-secret`, and `third-app-binding-secret`.
+You should see `order-generator-binding-secret`, `order-processor-app-binding-secret`, `shipping-service-app-binding-secret`, and `delivery-service-app-binding-secret`.
