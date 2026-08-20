@@ -1,6 +1,6 @@
 ---
 title: "BrokerService Monitoring with Prometheus and Grafana"
-description: "Deploy messaging infrastructure using BrokerService/BrokerApp and scrape Prometheus metrics from within the cluster using mTLS."
+description: "Build and observe a realistic order-processing pipeline using BrokerService, BrokerApp, Camel, Prometheus and Grafana."
 draft: false
 images: []
 menu:
@@ -10,71 +10,66 @@ weight: 123
 toc: true
 ---
 
-This tutorial shows how to deploy messaging infrastructure using the **Separation of Concerns** pattern with the `BrokerService` and `BrokerApp` Custom Resources (CRDs).
+## 1. What We're Building
 
-It covers deploying the automated infrastructure, testing it with a Camel Quarkus application, and configuring a secure Prometheus/Grafana stack to visualize the throughput and resource footprint.
+This tutorial deploys a realistic event-driven order-processing pipeline and shows how to observe it with Prometheus and Grafana.
 
-## What is the Separation of Concerns?
+### Architecture
 
-**Operations teams** deploy a `BrokerService` (an infrastructure appliance), while **Developers** deploy a `BrokerApp` (a declaration of their messaging intent). The Operator automatically wires them together, creates the queues, and assigns dynamic ports.
+```
+ Traffic Generator           5 msg/s
+ (order-generator)               │
+                                 ▼
+                          ORDERS.NEW
+                                 │
+                          first-app
+                          Order Processor
+                                 │
+                                 ▼
+                       ORDERS.PROCESSED
+                                 │
+                          second-app
+                          Shipping Service
+                                 │
+                                 ▼
+                        ORDERS.SHIPPED
+                                 │
+                          third-app
+                          Delivery Service
+                                 │
+                                 ▼
+                       ORDERS.DELIVERED
+                                 │
+                          master-sink
+                          (optional drain)
+                                 │
+                                 ▼
 
-## Why monitor this way?
-
-Because the `BrokerService` acts as a "black box" appliance to simplify deployments, it does not expose a Kubernetes Service for the metrics port by default. To achieve observability, this tutorial demonstrates how to:
-
-1. Create a Kubernetes Service to expose the metrics port (8888)
-2. Use a ServiceMonitor to configure Prometheus scraping
-3. Access Grafana via port-forwarding to view the metrics
-
-**Note:** The ArkMQ Broker Operator automatically configures the Prometheus Java agent on port 8888 inside the broker pods. We don't need to manually inject the agent - the Operator handles this for us. We just need to create the Service and ServiceMonitor to make the metrics accessible to Prometheus.
-
-## Architecture Overview
-
-### Component Interactions
-
-This diagram shows the operational flow between components during normal monitoring and messaging:
-
-```mermaid
-graph TD
-    subgraph app_monitoring ["Application & Monitoring (service-app-project ns)"]
-        Operator["ArkMQ Broker Operator<br/>(Auto-configures Prometheus agent)"]
-        ArtemisBroker["BrokerService Pods<br/>(Metrics on port 8888)"]
-        MetricsService["Kubernetes Service<br/>(messaging-service-metrics)"]
-        ServiceMonitor["ServiceMonitor<br/>(release: prometheus label)"]
-        Binding["first-app-binding-secret"]
-
-        subgraph messaging_clients ["Integration Tier"]
-            CamelApp["Camel Quarkus JMS Application"]
-        end
-
-        subgraph monitoring_stack ["Monitoring Stack (kube-prometheus-stack)"]
-            Prometheus["Prometheus<br/>(Auto-discovers ServiceMonitor)"]
-            Grafana["Grafana<br/>(Pre-configured datasource)"]
-        end
-    end
-
-    Operator -->|"Manages & Configures"| ArtemisBroker
-    CamelApp -.->|"Reads Connection Details"| Binding
-    CamelApp -->|"Produces & Consumes Messages (mTLS)"| ArtemisBroker
-    MetricsService -->|"Exposes port 8888"| ArtemisBroker
-    ServiceMonitor -->|"Discovers via label"| MetricsService
-    Prometheus -->|"Scrapes via ServiceMonitor"| MetricsService
-    Grafana -->|"Queries all metrics"| Prometheus
-
-    style app_monitoring fill:#f5f5f5,stroke:#9e9e9e,stroke-width:2px
-    style messaging_clients fill:#a5d6a7,stroke:#2e7d32,stroke-width:2px
-    style monitoring_stack fill:#ffcc02,stroke:#f57c00,stroke-width:2px
-
-    User["User"] -->|"Port-forward & Views"| Grafana
+          BrokerService → Prometheus → Grafana
 ```
 
-## Prerequisites
+**One reusable Camel image, four pipeline roles.**
+The same container image (`camel-jms-app`) is deployed four times for the core pipeline. An optional fifth deployment, `master-sink`, can drain the terminal queue when needed.
+Role and queue configuration come from environment variables.
+
+| Kubernetes Deployment | BrokerApp identity | `APP_ROLE` | Consumes | Produces |
+|---|---|---|---|---|
+| order-generator | `order-generator` | `generator` | — | `ORDERS.NEW` |
+| camel-jms-app | `first-app` | `processor` | `ORDERS.NEW` | `ORDERS.PROCESSED` |
+| camel-jms-app-second | `second-app` | `shipping` | `ORDERS.PROCESSED` | `ORDERS.SHIPPED` |
+| camel-jms-app-third | `third-app` | `delivery` | `ORDERS.SHIPPED` | `ORDERS.DELIVERED` |
+
+The BrokerApp identity (column 2) is what Artemis uses for access control. The Kubernetes Deployment name is what `kubectl` uses. These are intentionally different so the tutorial's operational commands are unambiguous.
+
+### Prerequisites
 
 - A running Kubernetes cluster (this tutorial uses `minikube`)
 - `kubectl` configured to interact with your cluster
 - `helm` installed for deploying monitoring components
 
-## 1. Setup Infrastructure
+---
+
+## 2. Setup Infrastructure
 
 ### Start Minikube
 
@@ -96,7 +91,7 @@ kubectl config set-context --current --namespace=service-app-project
 kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.15.1/cert-manager.yaml
 ```
 
-Wait for `cert-manager` to be ready.
+Wait for `cert-manager` to be ready:
 
 ```bash {"stage":"init", "label":"wait for cert-manager", "runtime":"bash"}
 kubectl wait deployment --for=condition=Available -n cert-manager --timeout=600s cert-manager cert-manager-cainjector cert-manager-webhook
@@ -104,21 +99,15 @@ kubectl wait deployment --for=condition=Available -n cert-manager --timeout=600s
 
 ### Install Trust Manager
 
-First, add the Jetstack Helm repository.
-
 ```bash {"stage":"init", "label":"add jetstack helm repo", "runtime":"bash"}
 helm repo add jetstack https://charts.jetstack.io --force-update
 ```
-
-Now, install `trust-manager`.
 
 ```bash {"stage":"init", "label":"install trust-manager", "runtime":"bash"}
 helm upgrade trust-manager jetstack/trust-manager --install --namespace cert-manager --set secretTargets.enabled=true --set secretTargets.authorizedSecretsAll=true --wait
 ```
 
 ### Install kube-prometheus-stack
-
-Install the Prometheus Operator and Grafana stack. This provides the monitoring infrastructure that will automatically discover our ServiceMonitor:
 
 ```bash {"stage":"init", "label":"add prometheus helm repo", "runtime":"bash"}
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
@@ -138,13 +127,7 @@ helm upgrade -i prometheus prometheus-community/kube-prometheus-stack \
   --wait
 ```
 
-This installs:
-- **Prometheus Operator**: Manages Prometheus instances and ServiceMonitors
-- **Prometheus**: Collects metrics from targets
-- **Grafana**: Visualizes metrics with dashboards
-- **ServiceMonitor CRDs**: Enables automatic target discovery
-
-Wait for all components to be ready:
+Wait for all monitoring components:
 
 ```bash {"stage":"init", "label":"wait for prometheus stack", "runtime":"bash"}
 kubectl wait deployment --for=condition=Available -n service-app-project prometheus-grafana prometheus-kube-prometheus-operator --timeout=300s
@@ -157,20 +140,16 @@ kubectl wait statefulset --for=jsonpath='{.status.readyReplicas}'=1 -n service-a
 ./deploy/install_opr.sh
 ```
 
-Wait for the operator pod to become ready.
-
 ```bash {"stage":"init", "label":"wait for the operator to be running", "runtime":"bash"}
 kubectl wait deployment arkmq-org-broker-controller-manager --for=create --timeout=240s
 kubectl wait pod --all --for=condition=Ready --namespace=service-app-project --timeout=600s
 ```
 
-## 2. Configure Certificates
+---
 
-We'll set up a CA and issue certificates for the operator, the service, and the application.
+## 3. Configure Certificates
 
 ### Create Issuers and Root Certificate
-
-First the root issuer.
 
 ```bash {"stage":"deploy_certs", "label":"create root issuer", "runtime":"bash"}
 kubectl apply -f - <<EOF
@@ -186,8 +165,6 @@ EOF
 ```bash {"stage":"deploy_certs", "label":"wait for root issuer", "runtime":"bash"}
 kubectl wait clusterissuer root-issuer --for=condition=Ready --timeout=300s
 ```
-
-Then the root certificate.
 
 ```bash {"stage":"deploy_certs", "label":"create root cert", "runtime":"bash"}
 kubectl apply -f - <<EOF
@@ -210,8 +187,6 @@ EOF
 kubectl wait certificate root-cert --for=condition=Ready -n cert-manager --timeout=300s
 ```
 
-Then a signing issuer that uses the root certificate.
-
 ```bash {"stage":"deploy_certs", "label":"create signing issuer", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: cert-manager.io/v1
@@ -229,8 +204,6 @@ kubectl wait clusterissuer broker-ca-issuer --for=condition=Ready --timeout=300s
 ```
 
 ### Create Operator Certificate
-
-#### Install the CA Bundle in the `cert-manager` namespace
 
 ```bash {"stage":"deploy_certs", "label":"create ca bundle", "runtime":"bash"}
 kubectl apply -f - <<EOF
@@ -254,8 +227,6 @@ EOF
 kubectl wait bundle arkmq-org-broker-manager-ca -n cert-manager --for=condition=Synced --timeout=300s
 ```
 
-#### Create the certificate for the operator
-
 ```bash {"stage":"deploy_certs", "label":"create operator cert", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: cert-manager.io/v1
@@ -276,11 +247,11 @@ EOF
 kubectl wait certificate arkmq-org-broker-manager-cert -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
-## 3. Deploy BrokerService
+---
 
-### Create BrokerService Certificate
+## 4. Deploy BrokerService and BrokerApps
 
-The service needs a certificate customized with a matching common name to enable mTLS communication.
+### BrokerService Certificate
 
 ```bash {"stage":"deploy_service", "label":"create broker cert", "runtime":"bash"}
 kubectl apply -f - <<EOF
@@ -308,8 +279,6 @@ kubectl wait certificate messaging-service-broker-cert -n service-app-project --
 
 ### Deploy BrokerService
 
-Deploy the `BrokerService`. The ArkMQ Operator automatically configures the Prometheus JMX exporter on port 8888:
-
 ```bash {"stage":"deploy_service", "label":"deploy brokerservice", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: broker.arkmq.org/v1beta2
@@ -321,27 +290,81 @@ metadata:
     forWorkQueue: "true"
 spec:
   resources:
+    requests:
+      memory: "2Gi"
     limits:
-      memory: "1Gi"
+      memory: "2Gi"
   env:
     - name: JAVA_ARGS_APPEND
       value: "-Dlog4j2.level=INFO"
 EOF
 ```
 
-Wait for the BrokerService to be ready:
-
 ```bash {"stage":"deploy_service", "label":"wait for brokerservice", "runtime":"bash"}
 kubectl wait BrokerService messaging-service -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
-## 4. Deploy BrokerApp
+### Deploy BrokerApps
 
-The `BrokerApp` declares the messaging requirements for the application.
+Each `BrokerApp` declares exactly the permissions its pipeline stage needs. The ownership chain is:
 
-### Create Application Certificate
+```
+order-generator  →  ORDERS.NEW  →  first-app  →  ORDERS.PROCESSED  →  second-app  →  ORDERS.SHIPPED  →  third-app  →  ORDERS.DELIVERED
+   (produce)          (consume/produce)                (consume/produce)                  (consume/produce)
+```
 
-```bash {"stage":"deploy_app", "label":"create app cert", "runtime":"bash"}
+Each app only owns the addresses it **produces**. Downstream consumers reference upstream producers using `appName` + `appNamespace`.
+
+#### order-generator (Traffic Generator)
+
+The generator has a single capability: produce into `ORDERS.NEW`.
+
+```bash {"stage":"deploy_app", "label":"create order-generator cert", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: order-generator-app-cert
+  namespace: service-app-project
+spec:
+  secretName: order-generator-app-cert
+  commonName: order-generator
+  issuerRef:
+    name: broker-ca-issuer
+    kind: ClusterIssuer
+EOF
+```
+
+```bash {"stage":"deploy_app", "label":"wait for order-generator cert", "runtime":"bash"}
+kubectl wait certificate order-generator-app-cert -n service-app-project --for=condition=Ready --timeout=300s
+```
+
+```bash {"stage":"deploy_app", "label":"deploy order-generator brokerapp", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: broker.arkmq.org/v1beta2
+kind: BrokerApp
+metadata:
+  name: order-generator
+  namespace: service-app-project
+spec:
+  selector:
+    matchLabels:
+      forWorkQueue: "true"
+  sharedAddresses:
+    - address: "ORDERS.NEW"
+  capabilities:
+    - producerOf:
+        - address: "ORDERS.NEW"
+EOF
+```
+
+```bash {"stage":"deploy_app", "label":"wait for order-generator brokerapp", "runtime":"bash"}
+kubectl wait BrokerApp order-generator -n service-app-project --for=condition=Ready --timeout=300s
+```
+
+#### first-app (Order Processor)
+
+```bash {"stage":"deploy_app", "label":"create first-app cert", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -357,17 +380,11 @@ spec:
 EOF
 ```
 
-Wait for cert-manager to generate the `first-app-app-cert` secret before proceeding:
-
-```bash {"stage":"deploy_app", "label":"wait for app cert secret", "runtime":"bash"}
-kubectl wait secret first-app-app-cert -n service-app-project --for=create --timeout=300s
+```bash {"stage":"deploy_app", "label":"wait for first-app cert", "runtime":"bash"}
+kubectl wait certificate first-app-app-cert -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
-### Deploy BrokerApp
-
-The `BrokerApp` connects to the `BrokerService` using label selectors and declares its messaging capabilities:
-
-```bash {"stage":"deploy_app", "label":"deploy brokerapp", "runtime":"bash"}
+```bash {"stage":"deploy_app", "label":"deploy first-app brokerapp", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: broker.arkmq.org/v1beta2
 kind: BrokerApp
@@ -383,740 +400,20 @@ spec:
   capabilities:
     - consumerOf:
         - address: "ORDERS.NEW"
+          appName: "order-generator"
+          appNamespace: "service-app-project"
       producerOf:
         - address: "ORDERS.PROCESSED"
-        - address: "ORDERS.NEW"
 EOF
 ```
 
-Wait for the BrokerApp to be ready.
-
-```bash {"stage":"deploy_app", "label":"wait for brokerapp", "runtime":"bash"}
+```bash {"stage":"deploy_app", "label":"wait for first-app brokerapp", "runtime":"bash"}
 kubectl wait BrokerApp first-app -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
-### Verify Port Assignment
+#### second-app (Shipping Service)
 
-Check the automatically assigned port:
-
-```bash {"stage":"deploy_app", "label":"check port assignment", "runtime":"bash"}
-kubectl get BrokerApp first-app -n service-app-project -o jsonpath='{.status.assignedPort}{"\n"}'
-```
-
-Wait for the `BrokerService` to mark all apps provisioned (broker has reloaded TLS/JAAS config with the new app's credentials), then wait for the broker pod itself to be ready:
-
-```bash {"stage":"deploy_app", "label":"wait for apps provisioned", "runtime":"bash"}
-kubectl wait BrokerService messaging-service -n service-app-project --for=condition=AppsProvisioned --timeout=300s
-kubectl wait pod --selector=ActiveMQArtemis=messaging-service -n service-app-project --for=condition=Ready --timeout=300s
-```
-
-## 5. Deploy Camel Quarkus Application
-
-The Camel application will read connection details from the binding secret created by the operator.
-
-### Create PEM Configuration Secret
-
-Create a secret with PEM keystore configuration:
-
-```bash {"stage":"deploy_camel", "label":"create pemcfg secret", "runtime":"bash"}
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: cert-pemcfg
-  namespace: service-app-project
-type: Opaque
-stringData:
-  tls.pemcfg: |
-    source.key=/app/tls/client/tls.key
-    source.cert=/app/tls/client/tls.crt
-  java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
-EOF
-```
-
-### Deploy Camel Application
-
-```bash {"stage":"deploy_camel", "label":"deploy camel app", "runtime":"bash"}
-kubectl apply -f - <<EOF
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: camel-jms-app
-  namespace: service-app-project
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: camel-jms-app
-  template:
-    metadata:
-      labels:
-        app: camel-jms-app
-    spec:
-      containers:
-      - name: camel-jms-app
-        image: quay.io/rh-ee-vnachiap/camel-jms-app:5.0.2
-        imagePullPolicy: Always
-        resources:
-          limits:
-            memory: "512Mi"
-            cpu: "500m"
-          requests:
-            memory: "256Mi"
-            cpu: "100m"
-        env:
-        - name: BROKER_HOST
-          valueFrom:
-            secretKeyRef:
-              name: first-app-binding-secret
-              key: host
-        - name: BROKER_PORT
-          valueFrom:
-            secretKeyRef:
-              name: first-app-binding-secret
-              key: port
-        - name: PRODUCER_QUEUE
-          value: "ORDERS.PROCESSED"
-        - name: CONSUMER_QUEUE
-          value: "ORDERS.NEW"
-        - name: CLIENT_USERNAME
-          value: "first-app"
-        - name: JDK_JAVA_OPTIONS
-          value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-3.0.0.jar:/deployments/lib/main/com.hierynomus.asn-one-0.6.0.jar:/deployments/lib/main/org.slf4j.slf4j-api-2.0.18.jar -Djava.security.properties=/app/tls/pem/java.security"
-        volumeMounts:
-        - name: trust
-          mountPath: /app/tls/ca
-          readOnly: true
-        - name: cert
-          mountPath: /app/tls/client
-          readOnly: true
-        - name: pem
-          mountPath: /app/tls/pem
-          readOnly: true
-      volumes:
-      - name: trust
-        secret:
-          secretName: arkmq-org-broker-manager-ca
-      - name: cert
-        secret:
-          secretName: first-app-app-cert
-      - name: pem
-        secret:
-          secretName: cert-pemcfg
-EOF
-```
-
-Wait for the Camel application to be ready.
-
-```bash {"stage":"deploy_camel", "label":"wait for camel app", "runtime":"bash"}
-kubectl wait deployment camel-jms-app -n service-app-project --for=condition=Available --timeout=300s
-```
-
-### Verify Messaging
-
-Check the Camel application logs to see messages being produced and consumed:
-
-```bash {"stage":"verify", "label":"check camel logs", "runtime":"bash"}
-kubectl logs -n service-app-project deployment/camel-jms-app --tail=50
-```
-
-You should see:
-- Producer route sending messages every 10 seconds
-- Consumer route receiving and processing messages
-- No connection errors
-
-## 6. Setup Prometheus Monitoring
-
-Now we'll configure the **default Prometheus stack** (from kube-prometheus-stack) to scrape metrics from the broker using HTTPS with mTLS authentication.
-
-### Why Use the Default Stack?
-
-The kube-prometheus-stack we installed in Step 1 already includes:
-- ✅ Prometheus with proper RBAC permissions
-- ✅ Grafana with pre-configured datasource
-- ✅ Automatic ServiceMonitor discovery
-
-### Understanding the Metrics Endpoint Security
-
-The broker's Prometheus Java agent on port 8888 requires:
-- **HTTPS** (not HTTP) - encrypted communication
-- **mTLS** (mutual TLS) - both client and server authenticate with certificates
-- **Identity-based access** - the client certificate's Common Name determines access permissions
-
-We need to:
-1. Create a Prometheus client certificate for authentication
-2. Create a Kubernetes Service to expose the broker's metrics port (8888)
-3. Create a ServiceMonitor with HTTPS and mTLS configuration
-4. Create a Grafana dashboard ConfigMap
-
-### Set Broker FQDN Environment Variable
-
-Set the broker's fully qualified domain name for use in the ServiceMonitor configuration:
-
-```bash {"stage":"monitoring", "label":"set broker fqdn", "runtime":"bash"}
-export BROKER_FQDN=messaging-service-ss-0.messaging-service-hdls-svc.service-app-project.svc.cluster.local
-echo "Broker FQDN: ${BROKER_FQDN}"
-```
-
-### Create Prometheus Client Certificate
-
-**CRITICAL:** The certificate secret MUST be named exactly `prometheus-cert` because the ArkMQ Operator looks for this specific name to configure the broker's access control list.
-
-Create a certificate for Prometheus to authenticate with the broker:
-
-```bash {"stage":"monitoring", "label":"create prometheus cert", "runtime":"bash"}
-kubectl apply -f - <<EOF
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: prometheus-cert
-  namespace: service-app-project
-spec:
-  secretName: prometheus-cert
-  commonName: prometheus
-  issuerRef:
-    name: broker-ca-issuer
-    kind: ClusterIssuer
-EOF
-```
-
-**Why this exact name matters:**
-- The ArkMQ Operator scans the namespace for a secret named `prometheus-cert`
-- When found, it extracts the Common Name and adds it to the broker's JAAS allowed list
-- Any other name (like `prometheus-metrics-cert`) will be ignored by the Operator
-- Without this, you'll get `401 Unauthorized` errors
-
-Wait for the certificate to be ready:
-
-```bash {"stage":"monitoring", "label":"wait for prometheus cert", "runtime":"bash"}
-kubectl wait certificate prometheus-cert -n service-app-project --for=condition=Ready --timeout=300s
-```
-
-Verify the certificate was created successfully:
-
-```bash {"stage":"monitoring", "label":"verify prometheus cert", "runtime":"bash"}
-kubectl get certificate prometheus-cert -n service-app-project
-kubectl get secret prometheus-cert -n service-app-project
-```
-
-You should see the certificate in "Ready" state and the secret containing `tls.crt`, `tls.key`, and `ca.crt`.
-
-### Create Metrics Service
-
-Create a Kubernetes Service that exposes the broker's metrics port (8888):
-
-```bash {"stage":"monitoring", "label":"create metrics service", "runtime":"bash"}
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Service
-metadata:
-  name: messaging-service-metrics
-  namespace: service-app-project
-  labels:
-    app: messaging-service
-spec:
-  selector:
-    ActiveMQArtemis: messaging-service
-  ports:
-    - name: metrics
-      port: 8888
-      targetPort: 8888
-      protocol: TCP
-EOF
-```
-
-### Create ServiceMonitor with mTLS
-
-Create a ServiceMonitor configured for HTTPS with mTLS authentication. The `release: prometheus` label tells the default Prometheus to automatically discover and scrape this target.
-
-**Note:** This uses the `${BROKER_FQDN}` environment variable set earlier for the `serverName` field:
-
-```bash {"stage":"monitoring", "label":"create servicemonitor", "runtime":"bash"}
-kubectl apply -f - <<EOF
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: messaging-service-monitor
-  namespace: service-app-project
-  labels:
-    app: messaging-service
-    release: prometheus
-spec:
-  selector:
-    matchLabels:
-      app: messaging-service
-  endpoints:
-  - port: metrics
-    scheme: https
-    interval: 30s
-    tlsConfig:
-      # The server name for certificate validation.
-      serverName: '${BROKER_FQDN}'
-      # CA certificate to trust the broker's server certificate.
-      ca:
-        secret:
-          name: arkmq-org-broker-manager-ca
-          key: ca.pem
-      # Client certificate for mutual TLS authentication.
-      cert:
-        secret:
-          name: prometheus-cert
-          key: tls.crt
-      # Client private key.
-      keySecret:
-        name: prometheus-cert
-        key: tls.key
-      # Enforce certificate validation.
-      insecureSkipVerify: false
-EOF
-```
-
-**Important Configuration Details:**
-- `scheme: https` - Use HTTPS instead of HTTP (port 8888 requires HTTPS)
-- `serverName` - The broker's FQDN for certificate validation (prevents hostname mismatch)
-- `ca` - CA certificate to trust the broker's server certificate
-- `cert` + `keySecret` - Prometheus client certificate for mTLS authentication (MUST be named `prometheus-cert`)
-- `insecureSkipVerify: false` - Enforce proper certificate validation
-- `release: prometheus` label - Connects to the default Prometheus instance
-
-### Verify Prometheus is Scraping
-
-The default Prometheus should automatically discover the ServiceMonitor within 30 seconds. You can verify by port-forwarding to Prometheus:
-
-```bash {"stage":"monitoring", "label":"port forward prometheus", "runtime":"bash"}
-kubectl port-forward svc/prometheus-kube-prometheus-prometheus \
-  -n service-app-project 9090:9090 > /tmp/prometheus-port-forward.log 2>&1 &
-```
-
-Then open http://localhost:9090/targets in your browser and verify:
-- Target `serviceMonitor/service-app-project/messaging-service-monitor/0` appears
-- Endpoint shows `messaging-service-metrics:8888`
-- State is "UP" (green)
-
-## 7. Create Grafana Dashboard
-
-The kube-prometheus-stack already includes Grafana with a pre-configured Prometheus datasource. Instead of relying on the Grafana sidecar to discover ConfigMaps (which can be unreliable), we'll inject the dashboard directly into Grafana's provisioning system using Helm values.
-
-### Create Dashboard and Apply via Helm
-
-Create the Helm values file and immediately upgrade the Prometheus stack in a single block. This ensures the file exists in the same shell context when Helm reads it:
-
-```bash {"stage":"grafana", "label":"create dashboard values and apply via helm", "runtime":"bash"}
-cat << 'EOF' > grafana-complete-values.yaml
-grafana:
-  sidecar:
-    dashboards:
-      enabled: true
-      label: grafana_dashboard
-      searchNamespace: ALL
-    datasources:
-      enabled: true
-  dashboards:
-    default:
-      artemis-broker-metrics:
-        json: |
-          {
-            "__inputs": [],
-            "__requires": [],
-            "annotations": { "list": [] },
-            "editable": true,
-            "gnetId": null,
-            "graphTooltip": 0,
-            "id": null,
-            "links": [],
-            "panels": [
-              {
-                "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-                "title": "Queue Message Count",
-                "type": "timeseries",
-                "datasource": { "type": "prometheus", "uid": "prometheus" },
-                "targets": [
-                  {
-                    "expr": "sum by (queue) (broker_queue_message_count{job=\"messaging-service-metrics\"})",
-                    "legendFormat": "{{queue}}",
-                    "refId": "A"
-                  }
-                ],
-                "fieldConfig": { "defaults": { "unit": "short" } }
-              },
-              {
-                "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
-                "title": "Queue Consumer Count",
-                "type": "timeseries",
-                "datasource": { "type": "prometheus", "uid": "prometheus" },
-                "targets": [
-                  {
-                    "expr": "sum by (queue) (broker_queue_consumer_count{job=\"messaging-service-metrics\"})",
-                    "legendFormat": "{{queue}}",
-                    "refId": "A"
-                  }
-                ],
-                "fieldConfig": { "defaults": { "unit": "short" } }
-              },
-              {
-                "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
-                "title": "Messages Being Delivered",
-                "type": "timeseries",
-                "datasource": { "type": "prometheus", "uid": "prometheus" },
-                "targets": [
-                  {
-                    "expr": "sum by (queue) (broker_queue_delivering_count{job=\"messaging-service-metrics\"})",
-                    "legendFormat": "{{queue}}",
-                    "refId": "A"
-                  }
-                ],
-                "fieldConfig": { "defaults": { "unit": "short" } }
-              },
-              {
-                "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
-                "title": "Queue Persistent Size",
-                "type": "timeseries",
-                "datasource": { "type": "prometheus", "uid": "prometheus" },
-                "targets": [
-                  {
-                    "expr": "sum by (queue) (broker_queue_persistent_size{job=\"messaging-service-metrics\"})",
-                    "legendFormat": "{{queue}}",
-                    "refId": "A"
-                  }
-                ],
-                "fieldConfig": { "defaults": { "unit": "bytes" } }
-              },
-              {
-                "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
-                "title": "CPU Usage",
-                "type": "timeseries",
-                "datasource": { "type": "prometheus", "uid": "prometheus" },
-                "targets": [
-                  {
-                    "expr": "sum(rate(container_cpu_usage_seconds_total{pod=~\"messaging-service-ss-.\"}[5m]))",
-                    "refId": "A"
-                  }
-                ],
-                "fieldConfig": { "defaults": { "unit": "percentunit" } }
-              },
-              {
-                "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
-                "title": "Memory Usage",
-                "type": "timeseries",
-                "datasource": { "type": "prometheus", "uid": "prometheus" },
-                "targets": [
-                  {
-                    "expr": "sum(container_memory_working_set_bytes{pod=~\"messaging-service-ss-.\"})",
-                    "refId": "A"
-                  }
-                ],
-                "fieldConfig": { "defaults": { "unit": "bytes" } }
-              },
-              {
-                "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
-                "title": "Configured Queue Count",
-                "type": "stat",
-                "datasource": { "type": "prometheus", "uid": "prometheus" },
-                "targets": [
-                  {
-                    "expr": "count(broker_queue_message_count{job=\"messaging-service-metrics\"})",
-                    "refId": "A"
-                  }
-                ],
-                "fieldConfig": {
-                  "defaults": {
-                    "color": { "mode": "thresholds" },
-                    "thresholds": {
-                      "mode": "absolute",
-                      "steps": [ { "color": "blue", "value": null } ]
-                    },
-                    "unit": "short"
-                  }
-                }
-              }
-            ],
-            "refresh": "5s",
-            "schemaVersion": 38,
-            "style": "dark",
-            "tags": ["artemis", "messaging"],
-            "templating": { "list": [] },
-            "time": { "from": "now-5m", "to": "now" },
-            "timepicker": {},
-            "timezone": "",
-            "title": "Artemis Broker Metrics (JMX Exporter)",
-            "uid": "artemis-broker-jmx",
-            "version": 1,
-            "weekStart": ""
-          }
-kubeControllerManager:
-  enabled: false
-kubeEtcd:
-  enabled: false
-kubeScheduler:
-  enabled: false
-EOF
-
-helm upgrade prometheus prometheus-community/kube-prometheus-stack \
-  -n service-app-project \
-  -f grafana-complete-values.yaml \
-  --wait
-```
-
-**Note:** The file creation and Helm upgrade are combined in one block so the file exists in the same shell context when Helm reads it. The dashboard uses `sum by (queue)` so each queue (`ORDERS.NEW`, `ORDERS.PROCESSED`, `ORDERS.SHIPPED`) appears as a separate series automatically — no dashboard changes are needed when new BrokerApps are added. Two new panels are also included: CPU Usage and Memory Usage for the broker pod, plus a Configured Queue Count stat panel.
-
-### Restart Grafana to Load Dashboard
-
-After applying the Helm upgrade, restart Grafana to ensure it picks up the new dashboard configuration:
-
-```bash {"stage":"grafana", "label":"restart grafana", "runtime":"bash"}
-kubectl rollout restart deployment/prometheus-grafana -n service-app-project
-kubectl rollout status deployment/prometheus-grafana -n service-app-project --timeout=120s
-```
-
-**Why is this needed?** When dashboards are provided via Helm values (not ConfigMaps), Grafana needs to be restarted to reload its provisioning configuration and discover the new dashboard.
-
-### Access Grafana
-
-The kube-prometheus-stack includes Grafana with everything pre-configured. Access it using port-forwarding:
-
-```bash {"stage":"grafana", "label":"port forward grafana", "runtime":"bash"}
-pkill -f "port-forward svc/prometheus-grafana" 2>/dev/null || true
-sleep 1
-kubectl port-forward svc/prometheus-grafana \
-  -n service-app-project 3000:80 > /tmp/grafana-port-forward.log 2>&1 &
-sleep 3
-echo "Grafana available at http://localhost:3000"
-```
-
-Then open your browser to: **http://localhost:3000**
-
-**Get Login Credentials:**
-
-The password is auto-generated by the Helm chart. Retrieve it with:
-
-```bash {"stage":"grafana", "label":"get grafana password", "runtime":"bash"}
-kubectl get secret prometheus-grafana -n service-app-project -o jsonpath='{.data.admin-password}' | base64 -d && echo
-```
-
-**Login Credentials:**
-- **Username:** `admin`
-- **Password:** (use the password from the command above)
-
-### View the Dashboard
-
-After logging in to Grafana:
-
-1. Click **"Dashboards"** in the left sidebar (or click the four-squares icon)
-2. Click **"Browse"**
-3. You should see **"Artemis Broker Metrics (JMX Exporter)"** dashboard
-4. Click on it to open
-
-The dashboard will show:
-- **Queue Message Count**: Total messages across all queues
-- **Queue Consumer Count**: Number of active consumers
-- **Messages Being Delivered**: Messages currently in delivery
-- **Queue Persistent Size**: Disk space used by persistent messages
-- **CPU Usage**: Broker pod CPU consumption
-- **Memory Usage**: Broker pod memory consumption
-
-All panels update in real-time (5-second refresh) showing live broker activity.
-
-### Troubleshooting: Dashboard Not Appearing
-
-If the dashboard doesn't appear in Grafana after running the Helm upgrade:
-
-**1. Verify the Helm upgrade was successful:**
-
-```bash
-helm list -n service-app-project
-```
-
-Look for the `prometheus` release and check the STATUS is `deployed`.
-
-**2. Check if Grafana picked up the dashboard:**
-
-```bash
-kubectl logs -n service-app-project deployment/prometheus-grafana -c grafana-sc-dashboard --tail=50
-```
-
-You should see logs indicating the dashboard was discovered and loaded.
-
-**3. Restart Grafana to force dashboard reload:**
-
-```bash
-kubectl rollout restart deployment/prometheus-grafana -n service-app-project
-kubectl rollout status deployment/prometheus-grafana -n service-app-project --timeout=120s
-```
-
-**4. Verify the dashboard configuration is in the Helm values:**
-
-```bash
-helm get values prometheus -n service-app-project
-```
-
-You should see the `grafana.dashboards.default.artemis-broker-metrics` section.
-
-**5. If still not visible, manually create the dashboard:**
-
-In Grafana UI:
-- Click **"+"** → **"Import dashboard"**
-- Click **"Import via panel json"**
-- Paste the JSON from the `grafana-dashboards.yaml` file (the content inside the `json: |` section)
-- Click **"Load"**
-- Select **"prometheus"** as the datasource
-- Click **"Import"**
-
-### Creating Aggregate Metrics from Queue Metrics
-
-The JMX exporter provides **per-queue metrics**, but you can aggregate them to get broker-level totals similar to what the Artemis Metrics Plugin would provide.
-
-#### Aggregation Queries in Grafana:
-
-**1. Total Messages Across All Queues:**
-```promql
-sum(broker_queue_message_count{job="messaging-service-metrics"})
-```
-This gives you the equivalent of `artemis_total_pending_message_count`.
-
-**2. Total Consumers Across All Queues:**
-```promql
-sum(broker_queue_consumer_count{job="messaging-service-metrics"})
-```
-
-**3. Total Messages Being Delivered:**
-```promql
-sum(broker_queue_delivering_count{job="messaging-service-metrics"})
-```
-
-**4. Total Disk Usage Across All Queues:**
-```promql
-sum(broker_queue_persistent_size{job="messaging-service-metrics"})
-```
-
-**5. Per-Queue Breakdown (see individual queues):**
-```promql
-broker_queue_message_count{job="messaging-service-metrics"}
-```
-This shows each queue separately with labels like `queue="APP.JOBS"`.
-
-**6. Top 5 Queues by Message Count:**
-```promql
-topk(5, broker_queue_message_count{job="messaging-service-metrics"})
-```
-
-**7. Average Messages Per Queue:**
-```promql
-avg(broker_queue_message_count{job="messaging-service-metrics"})
-```
-
-**8. Number of Active Queues (with messages > 0):**
-```promql
-count(broker_queue_message_count{job="messaging-service-metrics"} > 0)
-```
-This counts only queues that currently have messages, excluding empty queues.
-
-**8b. Total Configured Queues (including empty):**
-```promql
-count(broker_queue_message_count{job="messaging-service-metrics"})
-```
-This counts all queues, even if they're empty (message count = 0).
-
-#### Using Prometheus Recording Rules (Advanced):
-
-For better performance, you can create Prometheus recording rules that pre-calculate aggregations:
-
-```bash {"stage":"monitoring", "label":"create recording rules", "runtime":"bash"}
-kubectl apply -f - <<EOF
-apiVersion: monitoring.coreos.com/v1
-kind: PrometheusRule
-metadata:
-  name: artemis-aggregation-rules
-  namespace: service-app-project
-  labels:
-    # CRITICAL: This label tells Prometheus Operator to load this rule
-    # Must match the serviceMonitorSelector in the Prometheus CR
-    release: prometheus
-spec:
-  groups:
-  - name: artemis_aggregations
-    interval: 30s
-    rules:
-    # Total messages across all queues
-    - record: artemis:total_message_count
-      expr: sum(broker_queue_message_count{job="messaging-service-metrics"})
-    
-    # Total consumers across all queues
-    - record: artemis:total_consumer_count
-      expr: sum(broker_queue_consumer_count{job="messaging-service-metrics"})
-    
-    # Total messages being delivered
-    - record: artemis:total_delivering_count
-      expr: sum(broker_queue_delivering_count{job="messaging-service-metrics"})
-    
-    # Total disk usage
-    - record: artemis:total_persistent_size
-      expr: sum(broker_queue_persistent_size{job="messaging-service-metrics"})
-    
-    # Number of active queues (only queues with messages)
-    - record: artemis:active_queue_count
-      expr: count(broker_queue_message_count{job="messaging-service-metrics"} > 0)
-    
-    # Total configured queues (including empty ones)
-    - record: artemis:total_queue_count
-      expr: count(broker_queue_message_count{job="messaging-service-metrics"})
-EOF
-```
-
-After applying this PrometheusRule, you can use the simpler metrics in Grafana:
-```promql
-artemis:total_message_count
-artemis:total_consumer_count
-artemis:total_delivering_count
-artemis:total_persistent_size
-artemis:active_queue_count
-```
-
-**Benefits of Recording Rules:**
-- ✅ Pre-calculated, so queries are faster
-- ✅ Reduces load on Prometheus during dashboard rendering
-- ✅ Can be used in alerts
-- ✅ Cleaner metric names
-
-**Verify the rules are loaded:**
-```bash
-kubectl get prometheusrule -n service-app-project
-```
-
-### Manual Query Testing
-
-You can test these queries in Grafana's Explore view:
-
-1. Click **"Explore"** in the left sidebar (compass icon)
-2. The datasource is already set to **"Prometheus"** (the default)
-3. Try the aggregation queries listed above
-4. You should see data if metrics are being scraped correctly
-
-**List All Available JMX Metrics:**
-```promql
-{__name__=~"broker_queue_.*", job="messaging-service-metrics"}
-```
-
-## 8. Deploying a Second Application
-
-The `BrokerService` represents **shared messaging infrastructure**. Multiple applications can connect to the same `BrokerService` by creating additional `BrokerApp` resources. Each `BrokerApp` declares its own messaging requirements — the Operator automatically creates the required queues and assigns a unique connection port.
-
-After this section the broker topology becomes:
-
-```
-BrokerService: messaging-service
-        |
-        +------------------+
-        |                  |
-   first-app          second-app
-   ORDERS.NEW         ORDERS.SHIPPED   (producer + consumer)
-   ORDERS.PROCESSED   ORDERS.DELIVERED (producer + consumer)
-```
-
-Each `BrokerApp` owns its addresses independently — no address is shared between them. This is the correct pattern for the tutorial: two applications with separate queue lifecycles on the same `BrokerService`.
-
-### Create Second Application Certificate
-
-```bash {"stage":"deploy_second_app", "label":"create second app cert", "runtime":"bash"}
+```bash {"stage":"deploy_app", "label":"create second-app cert", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -1132,18 +429,11 @@ spec:
 EOF
 ```
 
-Wait for cert-manager to generate the TLS secret:
-
-```bash {"stage":"deploy_second_app", "label":"wait for second app cert", "runtime":"bash"}
-kubectl wait certificate second-app-app-cert \
-  -n service-app-project \
-  --for=condition=Ready \
-  --timeout=300s
+```bash {"stage":"deploy_app", "label":"wait for second-app cert", "runtime":"bash"}
+kubectl wait certificate second-app-app-cert -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
-### Deploy Second BrokerApp
-
-```bash {"stage":"deploy_second_app", "label":"deploy second brokerapp", "runtime":"bash"}
+```bash {"stage":"deploy_app", "label":"deploy second-app brokerapp", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: broker.arkmq.org/v1beta2
 kind: BrokerApp
@@ -1155,195 +445,24 @@ spec:
     matchLabels:
       forWorkQueue: "true"
   sharedAddresses:
-    - address: "ORDERS.DELIVERED"
+    - address: "ORDERS.SHIPPED"
   capabilities:
     - consumerOf:
-        - address: "ORDERS.SHIPPED"
+        - address: "ORDERS.PROCESSED"
+          appName: "first-app"
+          appNamespace: "service-app-project"
       producerOf:
-        - address: "ORDERS.DELIVERED"
         - address: "ORDERS.SHIPPED"
 EOF
 ```
 
-Wait for the BrokerApp to be ready:
-
-```bash {"stage":"deploy_second_app", "label":"wait for second brokerapp", "runtime":"bash"}
-kubectl wait BrokerApp second-app \
-  -n service-app-project \
-  --for=condition=Ready \
-  --timeout=300s
+```bash {"stage":"deploy_app", "label":"wait for second-app brokerapp", "runtime":"bash"}
+kubectl wait BrokerApp second-app -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
-Wait for the BrokerService to confirm both apps are provisioned (the operator rewrites the broker acceptor config and restarts the broker pod):
+#### third-app (Delivery Service)
 
-```bash {"stage":"deploy_second_app", "label":"wait for brokerservice apps provisioned", "runtime":"bash"}
-kubectl wait BrokerService messaging-service -n service-app-project \
-  --for=condition=AppsProvisioned \
-  --timeout=300s
-```
-
-Wait for the broker pod to finish its config-reload restart:
-
-```bash {"stage":"deploy_second_app", "label":"wait for broker pod ready after second app", "runtime":"bash"}
-kubectl wait pod --selector=ActiveMQArtemis=messaging-service \
-  -n service-app-project \
-  --for=condition=Ready \
-  --timeout=300s
-```
-
-### Verify Port Assignment
-
-The Operator assigns a new unique port to `second-app`:
-
-```bash {"stage":"deploy_second_app", "label":"check second app port", "runtime":"bash"}
-kubectl get BrokerApp second-app \
-  -n service-app-project \
-  -o jsonpath='{.status.assignedPort}{"\n"}'
-```
-
-You should see a different port from `first-app`. The binding secret for `second-app` is also created automatically:
-
-```bash {"stage":"deploy_second_app", "label":"check second app binding secret", "runtime":"bash"}
-kubectl get secret second-app-binding-secret \
-  -n service-app-project \
-  -o jsonpath='{.data.uri}' | base64 -d && echo
-```
-
-### Deploy Second Camel Application
-
-Wait for the binding secret before deploying:
-
-```bash {"stage":"deploy_second_app", "label":"wait for second app binding secret", "runtime":"bash"}
-kubectl wait secret second-app-binding-secret \
-  -n service-app-project \
-  --for=create \
-  --timeout=300s
-```
-
-Create a separate PEM keystore secret for `second-app` — same content as `cert-pemcfg` but mounts `second-app-app-cert`:
-
-```bash {"stage":"deploy_second_app", "label":"create second app pemcfg secret", "runtime":"bash"}
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: cert-pemcfg-second
-  namespace: service-app-project
-type: Opaque
-stringData:
-  tls.pemcfg: |
-    source.key=/app/tls/client/tls.key
-    source.cert=/app/tls/client/tls.crt
-  java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
-EOF
-```
-
-```bash {"stage":"deploy_second_app", "label":"deploy second camel app", "runtime":"bash"}
-kubectl apply -f - <<EOF
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: camel-jms-app-second
-  namespace: service-app-project
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: camel-jms-app-second
-  template:
-    metadata:
-      labels:
-        app: camel-jms-app-second
-    spec:
-      containers:
-      - name: camel-jms-app
-        image: quay.io/rh-ee-vnachiap/camel-jms-app:5.0.2
-        imagePullPolicy: Always
-        resources:
-          limits:
-            memory: "512Mi"
-            cpu: "500m"
-          requests:
-            memory: "256Mi"
-            cpu: "100m"
-        env:
-        - name: BROKER_HOST
-          valueFrom:
-            secretKeyRef:
-              name: second-app-binding-secret
-              key: host
-        - name: BROKER_PORT
-          valueFrom:
-            secretKeyRef:
-              name: second-app-binding-secret
-              key: port
-        - name: PRODUCER_QUEUE
-          value: "ORDERS.DELIVERED"
-        - name: CONSUMER_QUEUE
-          value: "ORDERS.SHIPPED"
-        - name: CLIENT_USERNAME
-          value: "second-app"
-        - name: JDK_JAVA_OPTIONS
-          value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-3.0.0.jar:/deployments/lib/main/com.hierynomus.asn-one-0.6.0.jar:/deployments/lib/main/org.slf4j.slf4j-api-2.0.18.jar -Djava.security.properties=/app/tls/pem/java.security"
-        volumeMounts:
-        - name: trust
-          mountPath: /app/tls/ca
-          readOnly: true
-        - name: cert
-          mountPath: /app/tls/client
-          readOnly: true
-        - name: pem
-          mountPath: /app/tls/pem
-          readOnly: true
-      volumes:
-      - name: trust
-        secret:
-          secretName: arkmq-org-broker-manager-ca
-      - name: cert
-        secret:
-          secretName: second-app-app-cert
-      - name: pem
-        secret:
-          secretName: cert-pemcfg-second
-EOF
-```
-
-```bash {"stage":"deploy_second_app", "label":"rollout restart second camel to pick up correct port", "runtime":"bash"}
-kubectl rollout restart deployment/camel-jms-app-second -n service-app-project
-kubectl rollout status deployment/camel-jms-app-second -n service-app-project --timeout=120s
-```
-
-```bash {"stage":"deploy_second_app", "label":"wait for second camel app", "runtime":"bash"}
-kubectl wait deployment camel-jms-app-second -n service-app-project --for=condition=Available --timeout=300s
-```
-
-### Verify Second App Messaging
-
-```bash {"stage":"deploy_second_app", "label":"check second camel logs", "runtime":"bash"}
-kubectl logs -n service-app-project deployment/camel-jms-app-second --tail=50
-```
-
-You should see the same pattern as `camel-jms-app`: producer sending to `ORDERS.DELIVERED` and consumer receiving from `ORDERS.SHIPPED`.
-
-## 9. Deploying a Third Application
-
-The `BrokerService` can host as many `BrokerApp` resources as needed. Here we add a third application handling customer returns, introducing `ORDERS.CUSTOMERS` and `ORDERS.RETURNS` queues.
-
-After this section the broker topology becomes:
-
-```
-BrokerService: messaging-service
-        |
-        +-----------------+-----------------+
-        |                 |                 |
-   first-app         second-app         third-app
-   ORDERS.NEW        ORDERS.SHIPPED     ORDERS.CUSTOMERS
-   ORDERS.PROCESSED  ORDERS.DELIVERED   ORDERS.RETURNS
-```
-
-### Create Third Application Certificate
-
-```bash {"stage":"deploy_third_app", "label":"create third app cert", "runtime":"bash"}
+```bash {"stage":"deploy_app", "label":"create third-app cert", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -1359,18 +478,11 @@ spec:
 EOF
 ```
 
-Wait for cert-manager to generate the TLS secret:
-
-```bash {"stage":"deploy_third_app", "label":"wait for third app cert", "runtime":"bash"}
-kubectl wait certificate third-app-app-cert \
-  -n service-app-project \
-  --for=condition=Ready \
-  --timeout=300s
+```bash {"stage":"deploy_app", "label":"wait for third-app cert", "runtime":"bash"}
+kubectl wait certificate third-app-app-cert -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
-### Deploy Third BrokerApp
-
-```bash {"stage":"deploy_third_app", "label":"deploy third brokerapp", "runtime":"bash"}
+```bash {"stage":"deploy_app", "label":"deploy third-app brokerapp", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: broker.arkmq.org/v1beta2
 kind: BrokerApp
@@ -1382,181 +494,28 @@ spec:
     matchLabels:
       forWorkQueue: "true"
   sharedAddresses:
-    - address: "ORDERS.RETURNS"
+    - address: "ORDERS.DELIVERED"
   capabilities:
     - consumerOf:
-        - address: "ORDERS.CUSTOMERS"
+        - address: "ORDERS.SHIPPED"
+          appName: "second-app"
+          appNamespace: "service-app-project"
       producerOf:
-        - address: "ORDERS.RETURNS"
-        - address: "ORDERS.CUSTOMERS"
+        - address: "ORDERS.DELIVERED"
 EOF
 ```
 
-Wait for the BrokerApp to be ready:
-
-```bash {"stage":"deploy_third_app", "label":"wait for third brokerapp", "runtime":"bash"}
-kubectl wait BrokerApp third-app \
-  -n service-app-project \
-  --for=condition=Ready \
-  --timeout=300s
+```bash {"stage":"deploy_app", "label":"wait for third-app brokerapp", "runtime":"bash"}
+kubectl wait BrokerApp third-app -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
-Wait for the BrokerService to confirm all three apps are provisioned:
+#### master-sink (Optional operational drain)
 
-```bash {"stage":"deploy_third_app", "label":"wait for brokerservice apps provisioned", "runtime":"bash"}
-kubectl wait BrokerService messaging-service -n service-app-project \
-  --for=condition=AppsProvisioned \
-  --timeout=300s
-```
+`master-sink` is not part of the business processing pipeline. It is an optional operational drain that you enable when you want to consume messages accumulating on the terminal `ORDERS.DELIVERED` queue — for example, to prevent unbounded growth during a long-running demo, or as an explicit "pipeline complete" acknowledgement.
 
-Wait for the broker pod to finish its config-reload restart:
+During the normal pipeline demonstration and the bottleneck/scale scenarios, keep this deployment at **0 replicas** so that `ORDERS.DELIVERED` depth remains visible in Grafana.
 
-```bash {"stage":"deploy_third_app", "label":"wait for broker pod ready after third app", "runtime":"bash"}
-kubectl wait pod --selector=ActiveMQArtemis=messaging-service \
-  -n service-app-project \
-  --for=condition=Ready \
-  --timeout=300s
-```
-
-### Verify Port Assignment
-
-```bash {"stage":"deploy_third_app", "label":"check third app port", "runtime":"bash"}
-kubectl get BrokerApp third-app \
-  -n service-app-project \
-  -o jsonpath='{.status.assignedPort}{"\n"}'
-```
-
-### Deploy Third Camel Application
-
-Wait for the binding secret before deploying:
-
-```bash {"stage":"deploy_third_app", "label":"wait for third app binding secret", "runtime":"bash"}
-kubectl wait secret third-app-binding-secret \
-  -n service-app-project \
-  --for=create \
-  --timeout=300s
-```
-
-Create a separate PEM keystore secret for `third-app`:
-
-```bash {"stage":"deploy_third_app", "label":"create third app pemcfg secret", "runtime":"bash"}
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: cert-pemcfg-third
-  namespace: service-app-project
-type: Opaque
-stringData:
-  tls.pemcfg: |
-    source.key=/app/tls/client/tls.key
-    source.cert=/app/tls/client/tls.crt
-  java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
-EOF
-```
-
-```bash {"stage":"deploy_third_app", "label":"deploy third camel app", "runtime":"bash"}
-kubectl apply -f - <<EOF
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: camel-jms-app-third
-  namespace: service-app-project
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: camel-jms-app-third
-  template:
-    metadata:
-      labels:
-        app: camel-jms-app-third
-    spec:
-      containers:
-      - name: camel-jms-app
-        image: quay.io/rh-ee-vnachiap/camel-jms-app:5.0.2
-        imagePullPolicy: Always
-        resources:
-          limits:
-            memory: "512Mi"
-            cpu: "500m"
-          requests:
-            memory: "256Mi"
-            cpu: "100m"
-        env:
-        - name: BROKER_HOST
-          valueFrom:
-            secretKeyRef:
-              name: third-app-binding-secret
-              key: host
-        - name: BROKER_PORT
-          valueFrom:
-            secretKeyRef:
-              name: third-app-binding-secret
-              key: port
-        - name: PRODUCER_QUEUE
-          value: "ORDERS.RETURNS"
-        - name: CONSUMER_QUEUE
-          value: "ORDERS.CUSTOMERS"
-        - name: CLIENT_USERNAME
-          value: "third-app"
-        - name: JDK_JAVA_OPTIONS
-          value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-3.0.0.jar:/deployments/lib/main/com.hierynomus.asn-one-0.6.0.jar:/deployments/lib/main/org.slf4j.slf4j-api-2.0.18.jar -Djava.security.properties=/app/tls/pem/java.security"
-        volumeMounts:
-        - name: trust
-          mountPath: /app/tls/ca
-          readOnly: true
-        - name: cert
-          mountPath: /app/tls/client
-          readOnly: true
-        - name: pem
-          mountPath: /app/tls/pem
-          readOnly: true
-      volumes:
-      - name: trust
-        secret:
-          secretName: arkmq-org-broker-manager-ca
-      - name: cert
-        secret:
-          secretName: third-app-app-cert
-      - name: pem
-        secret:
-          secretName: cert-pemcfg-third
-EOF
-```
-
-```bash {"stage":"deploy_third_app", "label":"rollout restart third camel to pick up correct port", "runtime":"bash"}
-kubectl rollout restart deployment/camel-jms-app-third -n service-app-project
-kubectl rollout status deployment/camel-jms-app-third -n service-app-project --timeout=120s
-```
-
-```bash {"stage":"deploy_third_app", "label":"wait for third camel app", "runtime":"bash"}
-kubectl wait deployment camel-jms-app-third -n service-app-project --for=condition=Available --timeout=300s
-```
-
-### Verify Third App Messaging
-
-```bash {"stage":"deploy_third_app", "label":"check third camel logs", "runtime":"bash"}
-kubectl logs -n service-app-project deployment/camel-jms-app-third --tail=50
-```
-
-You should see the same pattern as the other Camel apps: producer sending to `ORDERS.RETURNS` and consumer receiving from `ORDERS.CUSTOMERS`.
-
-## 10. Draining Queues with a Master Sink Application
-
-While production enterprise systems split queue processing across specialized microservices, a single **Master Sink Application** can consume from multiple queues simultaneously. Because Camel routes in a sink application do not terminate with a `.to("jms:queue:...")` producer endpoint, the broker deletes each message upon receipt and acknowledgment — draining queue backlogs and freeing memory.
-
-The sink drains the three producer output queues:
-
-```
-ORDERS.PROCESSED  ←  drained by inventory-sink  (5 concurrent consumers)
-ORDERS.DELIVERED  ←  drained by drain-delivered  (5 concurrent consumers)
-ORDERS.RETURNS    ←  drained by drain-returns    (5 concurrent consumers)
-```
-
-### Create Master Sink Application Certificate
-
-```bash {"stage":"deploy_sink_app", "label":"create sink app cert", "runtime":"bash"}
+```bash {"stage":"deploy_app", "label":"create master-sink cert", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -1572,27 +531,11 @@ spec:
 EOF
 ```
 
-```bash {"stage":"deploy_sink_app", "label":"wait for sink app cert", "runtime":"bash"}
-kubectl wait certificate master-sink-app-cert \
-  -n service-app-project \
-  --for=condition=Ready \
-  --timeout=300s
+```bash {"stage":"deploy_app", "label":"wait for master-sink cert", "runtime":"bash"}
+kubectl wait certificate master-sink-app-cert -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
-Wait for cert-manager to generate the `master-sink-app-cert` secret before deploying the BrokerApp:
-
-```bash {"stage":"deploy_sink_app", "label":"wait for sink app cert secret", "runtime":"bash"}
-kubectl wait secret master-sink-app-cert \
-  -n service-app-project \
-  --for=create \
-  --timeout=300s
-```
-
-### Deploy Master Sink BrokerApp
-
-This grants `master-sink-app` consume permissions on `ORDERS.PROCESSED`, `ORDERS.DELIVERED`, and `ORDERS.RETURNS`:
-
-```bash {"stage":"deploy_sink_app", "label":"deploy sink brokerapp", "runtime":"bash"}
+```bash {"stage":"deploy_app", "label":"deploy master-sink brokerapp", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: broker.arkmq.org/v1beta2
 kind: BrokerApp
@@ -1605,48 +548,19 @@ spec:
       forWorkQueue: "true"
   capabilities:
     - consumerOf:
-        - address: "ORDERS.PROCESSED"
-          appName: "first-app"
-          appNamespace: "service-app-project"
         - address: "ORDERS.DELIVERED"
-          appName: "second-app"
-          appNamespace: "service-app-project"
-        - address: "ORDERS.RETURNS"
           appName: "third-app"
           appNamespace: "service-app-project"
 EOF
 ```
 
-```bash {"stage":"deploy_sink_app", "label":"wait for sink brokerapp", "runtime":"bash"}
-kubectl wait BrokerApp master-sink-app \
-  -n service-app-project \
-  --for=condition=Ready \
-  --timeout=300s
+```bash {"stage":"deploy_app", "label":"wait for master-sink brokerapp", "runtime":"bash"}
+kubectl wait BrokerApp master-sink-app -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
-```bash {"stage":"deploy_sink_app", "label":"wait for brokerservice apps provisioned", "runtime":"bash"}
-kubectl wait BrokerService messaging-service -n service-app-project \
-  --for=condition=AppsProvisioned \
-  --timeout=300s
-```
+The Camel Deployment for master-sink is deployed at **0 replicas**. Scale it up only when you want to actively drain `ORDERS.DELIVERED`.
 
-```bash {"stage":"deploy_sink_app", "label":"wait for broker pod ready after sink app", "runtime":"bash"}
-kubectl wait pod --selector=ActiveMQArtemis=messaging-service \
-  -n service-app-project \
-  --for=condition=Ready \
-  --timeout=300s
-```
-
-### Deploy Master Sink Camel Application
-
-```bash {"stage":"deploy_sink_app", "label":"wait for sink app binding secret", "runtime":"bash"}
-kubectl wait secret master-sink-app-binding-secret \
-  -n service-app-project \
-  --for=create \
-  --timeout=300s
-```
-
-```bash {"stage":"deploy_sink_app", "label":"create sink app pemcfg secret", "runtime":"bash"}
+```bash {"stage":"deploy_app", "label":"create master-sink pemcfg", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Secret
@@ -1662,7 +576,11 @@ stringData:
 EOF
 ```
 
-```bash {"stage":"deploy_sink_app", "label":"deploy sink camel app", "runtime":"bash"}
+```bash {"stage":"deploy_app", "label":"wait for master-sink binding secret", "runtime":"bash"}
+kubectl wait secret master-sink-app-binding-secret -n service-app-project --for=create --timeout=300s
+```
+
+```bash {"stage":"deploy_app", "label":"deploy master-sink camel app", "runtime":"bash"}
 kubectl apply -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
@@ -1670,7 +588,7 @@ metadata:
   name: camel-jms-master-sink
   namespace: service-app-project
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: camel-jms-master-sink
@@ -1681,7 +599,7 @@ spec:
     spec:
       containers:
       - name: camel-jms-app
-        image: quay.io/rh-ee-vnachiap/camel-jms-app:master-sink-1.0
+        image: quay.io/rh-ee-vnachiap/camel-jms-app:pipeline-1.0
         imagePullPolicy: Always
         resources:
           limits:
@@ -1703,8 +621,14 @@ spec:
               key: port
         - name: CLIENT_USERNAME
           value: "master-sink-app"
+        - name: APP_ROLE
+          value: "sink"
         - name: CONSUMER_QUEUE
-          value: "ORDERS.PROCESSED,ORDERS.DELIVERED,ORDERS.RETURNS"
+          value: "ORDERS.DELIVERED"
+        - name: PRODUCER_QUEUE
+          value: "NONE"
+        - name: CONSUMER_CONCURRENCY
+          value: "5"
         - name: JDK_JAVA_OPTIONS
           value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-3.0.0.jar:/deployments/lib/main/com.hierynomus.asn-one-0.6.0.jar:/deployments/lib/main/org.slf4j.slf4j-api-2.0.18.jar -Djava.security.properties=/app/tls/pem/java.security"
         volumeMounts:
@@ -1730,107 +654,1009 @@ spec:
 EOF
 ```
 
-```bash {"stage":"deploy_sink_app", "label":"rollout restart sink camel to pick up correct port", "runtime":"bash"}
-kubectl rollout restart deployment/camel-jms-master-sink -n service-app-project
-kubectl rollout status deployment/camel-jms-master-sink -n service-app-project --timeout=120s
+To drain `ORDERS.DELIVERED` at any point during the tutorial, scale it up:
+
+```bash
+kubectl scale deployment camel-jms-master-sink --replicas=1 -n service-app-project
 ```
 
-```bash {"stage":"deploy_sink_app", "label":"wait for sink camel app", "runtime":"bash"}
-kubectl wait deployment camel-jms-master-sink -n service-app-project --for=condition=Available --timeout=300s
+To stop draining and let the queue accumulate again:
+
+```bash
+kubectl scale deployment camel-jms-master-sink --replicas=0 -n service-app-project
 ```
 
-### Verify Master Sink Messaging
+### Wait for All Apps Provisioned
 
-```bash {"stage":"deploy_sink_app", "label":"check sink camel logs", "runtime":"bash"}
-kubectl logs -n service-app-project deployment/camel-jms-master-sink --tail=50
+```bash {"stage":"deploy_app", "label":"wait for all apps provisioned", "runtime":"bash"}
+kubectl wait BrokerService messaging-service -n service-app-project --for=condition=AppsProvisioned --timeout=300s
+kubectl wait pod --selector=ActiveMQArtemis=messaging-service -n service-app-project --for=condition=Ready --timeout=300s
 ```
 
-You should see all three drain routes consuming simultaneously:
-- `drain-processed` logging `Cleaned up message from ORDERS.PROCESSED`
-- `drain-delivered` logging `Cleaned up message from ORDERS.DELIVERED`
-- `drain-returns` logging `Cleaned up message from ORDERS.RETURNS`
+### Verify BrokerApp Bindings
 
-Once the sink is running, observe the following changes in Grafana:
-- **Queue Message Count** for `ORDERS.PROCESSED`, `ORDERS.DELIVERED`, `ORDERS.RETURNS` drops rapidly toward zero
-- **Queue Consumer Count** increases as the sink adds 5 concurrent consumers per queue
-- **Queue Persistent Size** decreases as messages are purged
+Each `BrokerApp` causes the Operator to create a binding secret containing the broker host and port for that application's dedicated acceptor. The Camel Deployments in the next section read these secrets directly — no manual connection string management required.
 
-## 11. Observe All Applications in Grafana
-
-No changes are required to Prometheus or Grafana. The existing metrics pipeline automatically picks up the new queues:
-
-```
-Broker Metrics (port 8888)
-        |
-   Prometheus
-        |
-     Grafana
+```bash {"stage":"deploy_app", "label":"verify brokerapp bindings", "runtime":"bash"}
+kubectl get brokerapp -n service-app-project \
+  -o custom-columns='NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status,PORT:.status.service.assignedPort,SECRET:.status.service.secret'
 ```
 
-The dashboard queries use label selectors that cover all queues on the broker:
+Expected output:
 
-```promql
-broker_queue_message_count{job="messaging-service-metrics"}
+```
+NAME              READY   PORT    SECRET
+first-app         True    61617   first-app-binding-secret
+order-generator   True    61618   order-generator-binding-secret
+second-app        True    61619   second-app-binding-secret
+third-app         True    61620   third-app-binding-secret
 ```
 
-Within 30 seconds of `second-app` being provisioned, the **Queue Message Count** panel will show three separate queue series:
+Then confirm the secrets exist:
 
-| Label | Source |
+```bash {"stage":"deploy_app", "label":"verify binding secrets", "runtime":"bash"}
+kubectl get secret -n service-app-project | grep binding-secret
+```
+
+You should see `order-generator-binding-secret`, `first-app-binding-secret`, `second-app-binding-secret`, and `third-app-binding-secret` before proceeding to deploy the Camel applications.
+
+---
+
+## 5. Deploy Camel Applications
+
+The same Docker image is deployed four times. Role and queue configuration are injected via environment variables — no rebuilding required.
+
+### Shared PEM Secret
+
+```bash {"stage":"deploy_camel", "label":"create pemcfg secret", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cert-pemcfg
+  namespace: service-app-project
+type: Opaque
+stringData:
+  tls.pemcfg: |
+    source.key=/app/tls/client/tls.key
+    source.cert=/app/tls/client/tls.crt
+  java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
+EOF
+```
+
+Each deployment mounts its own app certificate at `/app/tls/client`. All four deployments share the same `cert-pemcfg` content (the PEM keystore type configuration), but mount different cert secrets for their individual mTLS identity.
+
+### order-generator
+
+Produces 25 realistic order JSON messages per second into `ORDERS.NEW`. The generator has its own `BrokerApp` identity (`order-generator`) with a single `producerOf: ORDERS.NEW` capability. This enforces least-privilege: `first-app` cannot send to `ORDERS.NEW` and `order-generator` cannot consume from it.
+
+Wait for the `order-generator` binding secret before deploying:
+
+```bash {"stage":"deploy_camel", "label":"wait for order-generator binding secret", "runtime":"bash"}
+kubectl wait secret order-generator-binding-secret -n service-app-project --for=create --timeout=300s
+```
+
+Create the PEM keystore secret for the generator's own certificate:
+
+```bash {"stage":"deploy_camel", "label":"create order-generator pemcfg", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cert-pemcfg-generator
+  namespace: service-app-project
+type: Opaque
+stringData:
+  tls.pemcfg: |
+    source.key=/app/tls/client/tls.key
+    source.cert=/app/tls/client/tls.crt
+  java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
+EOF
+```
+
+```bash {"stage":"deploy_camel", "label":"deploy order-generator", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-generator
+  namespace: service-app-project
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: order-generator
+  template:
+    metadata:
+      labels:
+        app: order-generator
+    spec:
+      containers:
+      - name: camel-jms-app
+        image: quay.io/rh-ee-vnachiap/camel-jms-app:pipeline-1.0
+        imagePullPolicy: Always
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+        env:
+        - name: BROKER_HOST
+          valueFrom:
+            secretKeyRef:
+              name: order-generator-binding-secret
+              key: host
+        - name: BROKER_PORT
+          valueFrom:
+            secretKeyRef:
+              name: order-generator-binding-secret
+              key: port
+        - name: CLIENT_USERNAME
+          value: "order-generator"
+        - name: APP_ROLE
+          value: "generator"
+        - name: PRODUCER_QUEUE
+          value: "ORDERS.NEW"
+        - name: MESSAGE_RATE
+          value: "5"
+        - name: JDK_JAVA_OPTIONS
+          value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-3.0.0.jar:/deployments/lib/main/com.hierynomus.asn-one-0.6.0.jar:/deployments/lib/main/org.slf4j.slf4j-api-2.0.18.jar -Djava.security.properties=/app/tls/pem/java.security"
+        volumeMounts:
+        - name: trust
+          mountPath: /app/tls/ca
+          readOnly: true
+        - name: cert
+          mountPath: /app/tls/client
+          readOnly: true
+        - name: pem
+          mountPath: /app/tls/pem
+          readOnly: true
+      volumes:
+      - name: trust
+        secret:
+          secretName: arkmq-org-broker-manager-ca
+      - name: cert
+        secret:
+          secretName: order-generator-app-cert
+      - name: pem
+        secret:
+          secretName: cert-pemcfg-generator
+EOF
+```
+
+```bash {"stage":"deploy_camel", "label":"wait for order-generator", "runtime":"bash"}
+kubectl wait deployment order-generator -n service-app-project --for=condition=Available --timeout=300s
+```
+
+### camel-jms-app (Order Processor — first-app)
+
+```bash {"stage":"deploy_camel", "label":"wait for first-app binding secret", "runtime":"bash"}
+kubectl wait secret first-app-binding-secret -n service-app-project --for=create --timeout=300s
+```
+
+```bash {"stage":"deploy_camel", "label":"create first-app pemcfg", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cert-pemcfg-first
+  namespace: service-app-project
+type: Opaque
+stringData:
+  tls.pemcfg: |
+    source.key=/app/tls/client/tls.key
+    source.cert=/app/tls/client/tls.crt
+  java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
+EOF
+```
+
+```bash {"stage":"deploy_camel", "label":"deploy camel-jms-app", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: camel-jms-app
+  namespace: service-app-project
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: camel-jms-app
+  template:
+    metadata:
+      labels:
+        app: camel-jms-app
+    spec:
+      containers:
+      - name: camel-jms-app
+        image: quay.io/rh-ee-vnachiap/camel-jms-app:pipeline-1.0
+        imagePullPolicy: Always
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+        env:
+        - name: BROKER_HOST
+          valueFrom:
+            secretKeyRef:
+              name: first-app-binding-secret
+              key: host
+        - name: BROKER_PORT
+          valueFrom:
+            secretKeyRef:
+              name: first-app-binding-secret
+              key: port
+        - name: CLIENT_USERNAME
+          value: "first-app"
+        - name: APP_ROLE
+          value: "processor"
+        - name: CONSUMER_QUEUE
+          value: "ORDERS.NEW"
+        - name: PRODUCER_QUEUE
+          value: "ORDERS.PROCESSED"
+        - name: PROCESSING_DELAY_MS
+          value: "100"
+        - name: CONSUMER_CONCURRENCY
+          value: "1"
+        # Throughput: 1 consumer / 0.1 s = ~10 msg/s — 2x headroom above the 5 msg/s generator rate.
+        - name: JDK_JAVA_OPTIONS
+          value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-3.0.0.jar:/deployments/lib/main/com.hierynomus.asn-one-0.6.0.jar:/deployments/lib/main/org.slf4j.slf4j-api-2.0.18.jar -Djava.security.properties=/app/tls/pem/java.security"
+        volumeMounts:
+        - name: trust
+          mountPath: /app/tls/ca
+          readOnly: true
+        - name: cert
+          mountPath: /app/tls/client
+          readOnly: true
+        - name: pem
+          mountPath: /app/tls/pem
+          readOnly: true
+      volumes:
+      - name: trust
+        secret:
+          secretName: arkmq-org-broker-manager-ca
+      - name: cert
+        secret:
+          secretName: first-app-app-cert
+      - name: pem
+        secret:
+          secretName: cert-pemcfg-first
+EOF
+```
+
+```bash {"stage":"deploy_camel", "label":"wait for camel-jms-app", "runtime":"bash"}
+kubectl wait deployment camel-jms-app -n service-app-project --for=condition=Available --timeout=300s
+```
+
+### camel-jms-app-second (Shipping Service — second-app)
+
+```bash {"stage":"deploy_camel", "label":"create second-app pemcfg", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cert-pemcfg-second
+  namespace: service-app-project
+type: Opaque
+stringData:
+  tls.pemcfg: |
+    source.key=/app/tls/client/tls.key
+    source.cert=/app/tls/client/tls.crt
+  java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
+EOF
+```
+
+```bash {"stage":"deploy_camel", "label":"wait for second-app binding secret", "runtime":"bash"}
+kubectl wait secret second-app-binding-secret -n service-app-project --for=create --timeout=300s
+```
+
+```bash {"stage":"deploy_camel", "label":"deploy camel-jms-app-second", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: camel-jms-app-second
+  namespace: service-app-project
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: camel-jms-app-second
+  template:
+    metadata:
+      labels:
+        app: camel-jms-app-second
+    spec:
+      containers:
+      - name: camel-jms-app
+        image: quay.io/rh-ee-vnachiap/camel-jms-app:pipeline-1.0
+        imagePullPolicy: Always
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+        env:
+        - name: BROKER_HOST
+          valueFrom:
+            secretKeyRef:
+              name: second-app-binding-secret
+              key: host
+        - name: BROKER_PORT
+          valueFrom:
+            secretKeyRef:
+              name: second-app-binding-secret
+              key: port
+        - name: CLIENT_USERNAME
+          value: "second-app"
+        - name: APP_ROLE
+          value: "shipping"
+        - name: CONSUMER_QUEUE
+          value: "ORDERS.PROCESSED"
+        - name: PRODUCER_QUEUE
+          value: "ORDERS.SHIPPED"
+        - name: PROCESSING_DELAY_MS
+          value: "25"
+        - name: CONSUMER_CONCURRENCY
+          value: "1"
+        # Throughput: 1 consumer / 0.025 s = ~40 msg/s — 8x headroom above the 5 msg/s generator rate.
+        - name: JDK_JAVA_OPTIONS
+          value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-3.0.0.jar:/deployments/lib/main/com.hierynomus.asn-one-0.6.0.jar:/deployments/lib/main/org.slf4j.slf4j-api-2.0.18.jar -Djava.security.properties=/app/tls/pem/java.security"
+        volumeMounts:
+        - name: trust
+          mountPath: /app/tls/ca
+          readOnly: true
+        - name: cert
+          mountPath: /app/tls/client
+          readOnly: true
+        - name: pem
+          mountPath: /app/tls/pem
+          readOnly: true
+      volumes:
+      - name: trust
+        secret:
+          secretName: arkmq-org-broker-manager-ca
+      - name: cert
+        secret:
+          secretName: second-app-app-cert
+      - name: pem
+        secret:
+          secretName: cert-pemcfg-second
+EOF
+```
+
+```bash {"stage":"deploy_camel", "label":"wait for camel-jms-app-second", "runtime":"bash"}
+kubectl rollout status deployment/camel-jms-app-second -n service-app-project --timeout=120s
+kubectl wait deployment camel-jms-app-second -n service-app-project --for=condition=Available --timeout=300s
+```
+
+### camel-jms-app-third (Delivery Service — third-app)
+
+```bash {"stage":"deploy_camel", "label":"create third-app pemcfg", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cert-pemcfg-third
+  namespace: service-app-project
+type: Opaque
+stringData:
+  tls.pemcfg: |
+    source.key=/app/tls/client/tls.key
+    source.cert=/app/tls/client/tls.crt
+  java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
+EOF
+```
+
+```bash {"stage":"deploy_camel", "label":"wait for third-app binding secret", "runtime":"bash"}
+kubectl wait secret third-app-binding-secret -n service-app-project --for=create --timeout=300s
+```
+
+```bash {"stage":"deploy_camel", "label":"deploy camel-jms-app-third", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: camel-jms-app-third
+  namespace: service-app-project
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: camel-jms-app-third
+  template:
+    metadata:
+      labels:
+        app: camel-jms-app-third
+    spec:
+      containers:
+      - name: camel-jms-app
+        image: quay.io/rh-ee-vnachiap/camel-jms-app:pipeline-1.0
+        imagePullPolicy: Always
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+        env:
+        - name: BROKER_HOST
+          valueFrom:
+            secretKeyRef:
+              name: third-app-binding-secret
+              key: host
+        - name: BROKER_PORT
+          valueFrom:
+            secretKeyRef:
+              name: third-app-binding-secret
+              key: port
+        - name: CLIENT_USERNAME
+          value: "third-app"
+        - name: APP_ROLE
+          value: "delivery"
+        - name: CONSUMER_QUEUE
+          value: "ORDERS.SHIPPED"
+        - name: PRODUCER_QUEUE
+          value: "ORDERS.DELIVERED"
+        - name: PROCESSING_DELAY_MS
+          value: "25"
+        - name: CONSUMER_CONCURRENCY
+          value: "1"
+        # Throughput: 1 consumer / 0.025 s = ~40 msg/s — above the 25 msg/s generator rate.
+        - name: JDK_JAVA_OPTIONS
+          value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-3.0.0.jar:/deployments/lib/main/com.hierynomus.asn-one-0.6.0.jar:/deployments/lib/main/org.slf4j.slf4j-api-2.0.18.jar -Djava.security.properties=/app/tls/pem/java.security"
+        volumeMounts:
+        - name: trust
+          mountPath: /app/tls/ca
+          readOnly: true
+        - name: cert
+          mountPath: /app/tls/client
+          readOnly: true
+        - name: pem
+          mountPath: /app/tls/pem
+          readOnly: true
+      volumes:
+      - name: trust
+        secret:
+          secretName: arkmq-org-broker-manager-ca
+      - name: cert
+        secret:
+          secretName: third-app-app-cert
+      - name: pem
+        secret:
+          secretName: cert-pemcfg-third
+EOF
+```
+
+```bash {"stage":"deploy_camel", "label":"wait for camel-jms-app-third", "runtime":"bash"}
+kubectl rollout status deployment/camel-jms-app-third -n service-app-project --timeout=120s
+kubectl wait deployment camel-jms-app-third -n service-app-project --for=condition=Available --timeout=300s
+```
+
+### Verify the Pipeline
+
+Check that orders are flowing through all stages:
+
+```bash {"stage":"verify", "label":"check generator logs", "runtime":"bash"}
+kubectl logs -n service-app-project deployment/order-generator --tail=20
+```
+
+```bash {"stage":"verify", "label":"check processor logs", "runtime":"bash"}
+kubectl logs -n service-app-project deployment/camel-jms-app --tail=20
+```
+
+```bash {"stage":"verify", "label":"check shipping logs", "runtime":"bash"}
+kubectl logs -n service-app-project deployment/camel-jms-app-second --tail=20
+```
+
+```bash {"stage":"verify", "label":"check delivery logs", "runtime":"bash"}
+kubectl logs -n service-app-project deployment/camel-jms-app-third --tail=20
+```
+
+You should see log lines like:
+
+```
+[generator]  → ORDERS.NEW      | orderId=ORD-8f31a2...
+[processor]  ← ORDERS.NEW      | processing...
+[processor]  → ORDERS.PROCESSED | status=PROCESSED
+[shipping]   ← ORDERS.PROCESSED | shipping...
+[shipping]   → ORDERS.SHIPPED   | status=SHIPPED
+[delivery]   ← ORDERS.SHIPPED   | delivering...
+[delivery]   → ORDERS.DELIVERED | status=DELIVERED
+```
+
+---
+
+## 6. Configure Prometheus Monitoring
+
+### Create Prometheus Client Certificate
+
+**CRITICAL:** The certificate secret must be named exactly `prometheus-cert`. The ArkMQ Operator looks for this specific name to add the Prometheus identity to the broker's access control list.
+
+```bash {"stage":"monitoring", "label":"create prometheus cert", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: prometheus-cert
+  namespace: service-app-project
+spec:
+  secretName: prometheus-cert
+  commonName: prometheus
+  issuerRef:
+    name: broker-ca-issuer
+    kind: ClusterIssuer
+EOF
+```
+
+```bash {"stage":"monitoring", "label":"wait for prometheus cert", "runtime":"bash"}
+kubectl wait certificate prometheus-cert -n service-app-project --for=condition=Ready --timeout=300s
+```
+
+### Create Metrics Service
+
+```bash {"stage":"monitoring", "label":"create metrics service", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: messaging-service-metrics
+  namespace: service-app-project
+  labels:
+    app: messaging-service
+spec:
+  selector:
+    ActiveMQArtemis: messaging-service
+  ports:
+    - name: metrics
+      port: 8888
+      targetPort: 8888
+      protocol: TCP
+EOF
+```
+
+### Create ServiceMonitor
+
+```bash {"stage":"monitoring", "label":"set broker fqdn", "runtime":"bash"}
+export BROKER_FQDN=messaging-service-ss-0.messaging-service-hdls-svc.service-app-project.svc.cluster.local
+echo "Broker FQDN: ${BROKER_FQDN}"
+```
+
+```bash {"stage":"monitoring", "label":"create servicemonitor", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: messaging-service-monitor
+  namespace: service-app-project
+  labels:
+    app: messaging-service
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: messaging-service
+  endpoints:
+  - port: metrics
+    scheme: https
+    interval: 15s
+    tlsConfig:
+      serverName: '${BROKER_FQDN}'
+      ca:
+        secret:
+          name: arkmq-org-broker-manager-ca
+          key: ca.pem
+      cert:
+        secret:
+          name: prometheus-cert
+          key: tls.crt
+      keySecret:
+        name: prometheus-cert
+        key: tls.key
+      insecureSkipVerify: false
+EOF
+```
+
+The scrape interval is set to 15 seconds so the queue-depth panels update quickly during the operations scenarios.
+
+### Create Prometheus Recording Rules
+
+Pre-aggregated rules make the Grafana dashboard queries fast:
+
+```bash {"stage":"monitoring", "label":"create recording rules", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: artemis-aggregation-rules
+  namespace: service-app-project
+  labels:
+    release: prometheus
+spec:
+  groups:
+  - name: artemis_aggregations
+    interval: 15s
+    rules:
+    # Pipeline ingress rate — messages entering via ORDERS.NEW only (not double-counted across stages)
+    - record: artemis:pipeline_ingress_rate
+      expr: rate(broker_queue_messages_added_total{job="messaging-service-metrics",queue="ORDERS.NEW"}[1m])
+    # Total messages currently waiting across all pipeline queues
+    - record: artemis:pipeline_backlog
+      expr: sum(broker_queue_message_count{job="messaging-service-metrics",queue=~"ORDERS[.].*"})
+    # Total consumers across pipeline queues
+    - record: artemis:pipeline_consumer_count
+      expr: sum(broker_queue_consumer_count{job="messaging-service-metrics",queue=~"ORDERS[.].*"})
+EOF
+```
+
+> **Troubleshooting metric names:** If your dashboard panels show "No data", the metric names exposed by your operator version may differ. Check what is available via Prometheus UI at http://localhost:9090 (after port-forwarding) by searching for `broker_queue`. Update the recording rule expressions and dashboard queries to match.
+
+---
+
+## 7. Create Grafana Dashboard
+
+The dashboard is built around six panels that tell the operational story: throughput in, queue depth per stage, consumer count, and broker resources.
+
+```bash {"stage":"grafana", "label":"create dashboard and apply via helm", "runtime":"bash"}
+cat << 'EOF' > grafana-complete-values.yaml
+grafana:
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: ALL
+    datasources:
+      enabled: true
+  dashboards:
+    default:
+      artemis-order-pipeline:
+        json: |
+          {
+            "__inputs": [],
+            "__requires": [],
+            "annotations": { "list": [] },
+            "editable": true,
+            "gnetId": null,
+            "graphTooltip": 0,
+            "id": null,
+            "links": [],
+            "panels": [
+              {
+                "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+                "title": "Ingress Rate (ORDERS.NEW)",
+                "description": "Messages entering the pipeline per second. Scoped to ORDERS.NEW to avoid double-counting across pipeline stages.",
+                "type": "stat",
+                "datasource": { "type": "prometheus", "uid": "prometheus" },
+                "targets": [
+                  {
+                    "expr": "artemis:pipeline_ingress_rate",
+                    "refId": "A"
+                  }
+                ],
+                "fieldConfig": {
+                  "defaults": {
+                    "unit": "short",
+                    "color": { "mode": "thresholds" },
+                    "thresholds": {
+                      "mode": "absolute",
+                      "steps": [
+                        { "color": "green", "value": null },
+                        { "color": "yellow", "value": 40 },
+                        { "color": "red", "value": 80 }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+                "title": "Total Messages Across Pipeline Queues",
+                "description": "Sum of messages waiting in all ORDERS.* queues. A spike here means at least one stage is behind.",
+                "type": "stat",
+                "datasource": { "type": "prometheus", "uid": "prometheus" },
+                "targets": [
+                  {
+                    "expr": "artemis:pipeline_backlog",
+                    "refId": "A"
+                  }
+                ],
+                "fieldConfig": {
+                  "defaults": {
+                    "unit": "short",
+                    "color": { "mode": "thresholds" },
+                    "thresholds": {
+                      "mode": "absolute",
+                      "steps": [
+                        { "color": "green", "value": null },
+                        { "color": "yellow", "value": 100 },
+                        { "color": "red", "value": 500 }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+                "title": "Active Pipeline Consumers",
+                "description": "Total JMS consumers connected across all ORDERS.* queues.",
+                "type": "stat",
+                "datasource": { "type": "prometheus", "uid": "prometheus" },
+                "targets": [
+                  {
+                    "expr": "artemis:pipeline_consumer_count",
+                    "refId": "A"
+                  }
+                ],
+                "fieldConfig": { "defaults": { "unit": "short" } }
+              },
+              {
+                "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+                "title": "Broker Pod Memory",
+                "description": "Kubernetes working set memory for the broker pod. Not the same as Artemis JVM heap.",
+                "type": "stat",
+                "datasource": { "type": "prometheus", "uid": "prometheus" },
+                "targets": [
+                  {
+                    "expr": "sum(container_memory_working_set_bytes{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\"})",
+                    "refId": "A"
+                  }
+                ],
+                "fieldConfig": { "defaults": { "unit": "bytes" } }
+              },
+              {
+                "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+                "title": "Queue Depth per Stage",
+                "description": "Watch ORDERS.PROCESSED grow when shipping is the bottleneck.",
+                "type": "timeseries",
+                "datasource": { "type": "prometheus", "uid": "prometheus" },
+                "targets": [
+                  {
+                    "expr": "broker_queue_message_count{job=\"messaging-service-metrics\",queue=~\"ORDERS[.].*\"}",
+                    "legendFormat": "{{queue}}",
+                    "refId": "A"
+                  }
+                ],
+                "fieldConfig": {
+                  "defaults": {
+                    "unit": "short",
+                    "custom": { "lineWidth": 2 }
+                  }
+                }
+              },
+              {
+                "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+                "title": "Consumer Count per Queue",
+                "description": "Scale camel-jms-app-second and watch the consumer count for ORDERS.PROCESSED increase.",
+                "type": "timeseries",
+                "datasource": { "type": "prometheus", "uid": "prometheus" },
+                "targets": [
+                  {
+                    "expr": "broker_queue_consumer_count{job=\"messaging-service-metrics\",queue=~\"ORDERS[.].*\"}",
+                    "legendFormat": "{{queue}}",
+                    "refId": "A"
+                  }
+                ],
+                "fieldConfig": { "defaults": { "unit": "short" } }
+              }
+            ],
+            "refresh": "10s",
+            "schemaVersion": 38,
+            "style": "dark",
+            "tags": ["artemis", "messaging", "pipeline"],
+            "templating": { "list": [] },
+            "time": { "from": "now-10m", "to": "now" },
+            "timepicker": {},
+            "timezone": "",
+            "title": "Order Processing Pipeline",
+            "uid": "order-pipeline",
+            "version": 1,
+            "weekStart": ""
+          }
+kubeControllerManager:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+EOF
+
+helm upgrade prometheus prometheus-community/kube-prometheus-stack \
+  -n service-app-project \
+  -f grafana-complete-values.yaml \
+  --wait
+```
+
+```bash {"stage":"grafana", "label":"restart grafana", "runtime":"bash"}
+kubectl rollout restart deployment/prometheus-grafana -n service-app-project
+kubectl rollout status deployment/prometheus-grafana -n service-app-project --timeout=120s
+```
+
+### Access Grafana
+
+```bash {"stage":"grafana", "label":"port forward grafana", "runtime":"bash"}
+pkill -f "port-forward svc/prometheus-grafana" 2>/dev/null || true
+sleep 1
+kubectl port-forward svc/prometheus-grafana \
+  -n service-app-project 3000:80 > /tmp/grafana-port-forward.log 2>&1 &
+sleep 3
+echo "Grafana available at http://localhost:3000"
+```
+
+```bash {"stage":"grafana", "label":"get grafana password", "runtime":"bash"}
+kubectl get secret prometheus-grafana -n service-app-project -o jsonpath='{.data.admin-password}' | base64 -d && echo
+```
+
+Login with username `admin` and the password printed above, then open the **"Order Processing Pipeline"** dashboard.
+
+Under normal conditions (5 msg/s, all consumers healthy) you should see:
+
+| Panel | Expected value |
 |---|---|
-| `queue="ORDERS.NEW"` | first-app consumer queue |
-| `queue="ORDERS.PROCESSED"` | first-app producer queue |
-| `queue="ORDERS.SHIPPED"` | second-app queue (producer + consumer) |
-| `queue="ORDERS.DELIVERED"` | second-app queue (producer + consumer) |
+| Ingress Rate (ORDERS.NEW) | ~5 msg/s |
+| Total Messages Across Pipeline Queues | ~0 (except ORDERS.DELIVERED — see below) |
+| Active Pipeline Consumers | ~3 (see breakdown below) |
+| Queue Depth per Stage | NEW/PROCESSED/SHIPPED flat near zero; DELIVERED growing |
 
-**To verify in Grafana:**
+**Why `ORDERS.DELIVERED` grows under normal conditions?** `master-sink` starts at **0 replicas** — there is deliberately no consumer on the terminal queue. `ORDERS.DELIVERED` will accumulate at ~5 msg/s. This is expected and useful: after ~20 seconds you should see a depth of roughly 100, proving the full pipeline is working end-to-end.
 
-1. Open the **"Artemis Broker Metrics (JMX Exporter)"** dashboard
-2. In the **Queue Message Count** panel, click the legend — you should see all three queue labels
-3. Open **Explore** and run:
+**Why ~3 consumers, not 4 applications?** The generator is producer-only (0 JMS consumers). `master-sink` starts at 0 replicas (0 consumers). Each processing stage opens one JMS session:
 
-```promql
-broker_queue_message_count{job="messaging-service-metrics"}
+| Deployment | `CONSUMER_CONCURRENCY` | JMS consumers |
+|---|---|---|
+| camel-jms-app (`first-app`) | 1 | 1 |
+| camel-jms-app-second (`second-app`) | 1 | 1 |
+| camel-jms-app-third (`third-app`) | 1 | 1 |
+| **Total** | | **3** |
+
+> **Note:** This assumes all configured JMS sessions are connected. Verify the actual count in Prometheus by searching for `broker_queue_consumer_count` and inspecting the `queue` and `job` labels.
+
+**Why the pipeline keeps up at baseline (theoretical capacities):**
+
+| Stage | Delay | Concurrency | Theoretical max | Headroom vs 5 msg/s |
+|---|---|---|---|---|
+| processor | 100 ms | 1 | ~10 msg/s | 2x |
+| shipping | 25 ms | 1 | ~40 msg/s | 8x |
+| delivery | 25 ms | 1 | ~40 msg/s | 8x |
+
+These are upper bounds assuming negligible JMS overhead. Every stage has comfortable headroom above the 5 msg/s generator rate.
+
+---
+
+## 8. Operations Scenarios
+
+These three scenarios are the purpose of the tutorial. Each one creates or resolves a real operational event that you observe in Grafana.
+
+### Scenario 1 — Normal Traffic
+
+Everything is already running. Open the dashboard and confirm the pipeline is flowing at 5 msg/s.
+
+```
+Generator: 5 msg/s
+
+processor (1x, 100 ms)  theoretical max ~10 msg/s  ->  ORDERS.PROCESSED  depth ~= 0
+shipping  (1x,  25 ms)  theoretical max ~40 msg/s  ->  ORDERS.SHIPPED    depth ~= 0
+delivery  (1x,  25 ms)  theoretical max ~40 msg/s  ->  ORDERS.DELIVERED  growing (no consumer)
 ```
 
-You should see separate time series for each queue with the `queue` label distinguishing them.
+**What to observe:** `ORDERS.NEW`, `ORDERS.PROCESSED`, and `ORDERS.SHIPPED` remain near zero. `ORDERS.DELIVERED` grows steadily because `master-sink` is intentionally disabled. Consumer count is stable (~3 at baseline — see consumer breakdown in the dashboard section above).
 
-**Key learning point:** Adding a `BrokerApp` changes the broker topology. No Prometheus or Grafana reconfiguration is needed — the dashboard automatically reflects the updated queue structure because it queries all queues on the broker, not a hardcoded list.
+After ~20 seconds at 5 msg/s, `ORDERS.DELIVERED` should show a depth of roughly 100. That proves the full pipeline is flowing correctly end-to-end. To drain it at any point, scale up `master-sink`:
 
-## 11. Summary
+```bash
+kubectl scale deployment camel-jms-master-sink --replicas=1 -n service-app-project
+```
 
-This tutorial demonstrated:
+### Scenario 2 — Create a Bottleneck
 
-1. ✅ **BrokerService deployment** with simple configuration (Operator handles Prometheus agent)
-2. ✅ **BrokerApp pattern** for separation of concerns
-3. ✅ **Camel application** reading dynamic connection details
-4. ✅ **Native Prometheus monitoring** using the default kube-prometheus-stack
-5. ✅ **Grafana visualization** with auto-discovered dashboards
-6. ✅ **Multi-application topology** — second BrokerApp sharing the same BrokerService
-7. ✅ **Automatic metrics discovery** — new queues appear in Grafana without reconfiguration
+Increase the shipping processing delay to make it the bottleneck:
 
-**Key Takeaways:**
+```bash {"stage":"scenario_bottleneck", "label":"slow down shipping", "runtime":"bash"}
+kubectl set env deployment/camel-jms-app-second \
+  PROCESSING_DELAY_MS=2000 \
+  -n service-app-project
+kubectl rollout status deployment/camel-jms-app-second -n service-app-project --timeout=120s
+```
 
-- BrokerService simplifies deployment - the Operator automatically configures Prometheus metrics on port 8888
-- The `release: prometheus` label on ServiceMonitor connects to the default Prometheus instance
-- No custom Prometheus or Grafana deployment needed - use the kube-prometheus-stack
-- Dashboard ConfigMaps with `grafana_dashboard: "1"` label are automatically imported
-- Port-forwarding provides reliable access to Grafana on Minikube
-- BrokerApp enables developers to declare messaging needs without infrastructure knowledge
-- Multiple BrokerApps can share one BrokerService — each gets its own port and queue isolation
+With `PROCESSING_DELAY_MS=2000` and `CONSUMER_CONCURRENCY=1`, the shipping service can process at most **0.5 msg/s** (theoretical). The generator is still producing 5 msg/s. Under idealized conditions `ORDERS.PROCESSED` should accumulate at roughly **4.5 messages per second** (5 − 0.5). The actual rate depends on JMS overhead and scheduling, but the growth will be clearly visible in Grafana within seconds.
+
+**What to observe in Grafana:**
+
+```
+ORDERS.PROCESSED queue depth
+        │
+        │              ▲ growing
+        │            ██
+        │          ████
+        │        ██████
+        │      ████████
+        └──────────────────► time
+```
+
+The `Queue Depth per Stage` panel shows `ORDERS.PROCESSED` climbing while the other queues stay flat. This is the bottleneck made visible.
+
+### Scenario 3 — Scale to Recover
+
+Scale the shipping deployment to five replicas:
+
+```bash {"stage":"scenario_scale", "label":"scale up shipping", "runtime":"bash"}
+kubectl scale deployment camel-jms-app-second \
+  --replicas=5 \
+  -n service-app-project
+kubectl wait deployment camel-jms-app-second \
+  -n service-app-project \
+  --for=condition=Available \
+  --timeout=300s
+```
+
+Scaling gives you five consumers, but they still have the 2-second processing delay — so aggregate throughput is still only ~2.5 msg/s at this point. The next step restores the 25 ms delay; after that rollout completes, aggregate theoretical capacity rises to ~200 msg/s, far exceeding the 5 msg/s input rate, and the backlog clears quickly:
+
+```bash {"stage":"scenario_scale", "label":"reset shipping delay", "runtime":"bash"}
+kubectl set env deployment/camel-jms-app-second \
+  PROCESSING_DELAY_MS=25 \
+  -n service-app-project
+kubectl rollout status deployment/camel-jms-app-second -n service-app-project --timeout=120s
+```
+
+After the scale-up and delay reset, the updated consumer counts are:
+
+| Queue | Consumers |
+|---|---|
+| `ORDERS.NEW` | 1 (unchanged) |
+| `ORDERS.PROCESSED` | 5 (scaled up from 1) |
+| `ORDERS.SHIPPED` | 1 (unchanged) |
+| **Total** | **7** |
+
+**What to observe in Grafana:**
+
+```
+ORDERS.PROCESSED queue depth
+        |
+        |      ^ grew during bottleneck
+        |    ########
+        |  ##########
+        |  ######
+        |  ####     <- draining after scale-up
+        |  ##
+        |  #
+        |  0        <- recovered
+        +-------------------> time
+```
+
+The `Consumer Count per Queue` panel shows `ORDERS.PROCESSED` consumer count jump from 1 to 5, and the `Total Messages Across Pipeline Queues` stat drop back toward zero.
+
+**The operational story:**
+
+> The shipping service became the bottleneck. We detected queue growth in Grafana and scaled the consumer deployment to restore throughput.
+
+That is the complete demonstration of why BrokerService and real-time monitoring matter.
+
+---
 
 ## Cleanup
 
-When you're finished, clean up the resources:
-
 ```bash
-# Delete the Camel applications
-kubectl delete deployment camel-jms-app camel-jms-app-second camel-jms-app-third -n service-app-project
+# Stop port-forwarding
+pkill -f "port-forward" 2>/dev/null || true
+
+# Delete Camel deployments
+kubectl delete deployment order-generator camel-jms-app camel-jms-app-second camel-jms-app-third -n service-app-project
+
+# Delete Camel sink deployment (if it was scaled up)
+kubectl delete deployment camel-jms-master-sink -n service-app-project 2>/dev/null || true
 
 # Delete BrokerApps
-kubectl delete BrokerApp first-app second-app third-app -n service-app-project
+kubectl delete BrokerApp order-generator first-app second-app third-app master-sink-app -n service-app-project
 
 # Delete PEM config secrets
-kubectl delete secret cert-pemcfg cert-pemcfg-second cert-pemcfg-third -n service-app-project
+kubectl delete secret cert-pemcfg cert-pemcfg-generator cert-pemcfg-first cert-pemcfg-second cert-pemcfg-third cert-pemcfg-sink -n service-app-project
 
 # Delete the BrokerService
 kubectl delete BrokerService messaging-service -n service-app-project
@@ -1838,76 +1664,109 @@ kubectl delete BrokerService messaging-service -n service-app-project
 # Delete monitoring resources
 kubectl delete servicemonitor messaging-service-monitor -n service-app-project
 kubectl delete service messaging-service-metrics -n service-app-project
-kubectl delete configmap artemis-dashboard -n service-app-project
+kubectl delete prometheusrule artemis-aggregation-rules -n service-app-project
 
-# Delete the namespace (optional - this removes everything)
+# Delete the namespace (removes everything remaining)
 kubectl delete namespace service-app-project
 
-# Delete the minikube cluster (optional)
+# Delete the minikube cluster
 minikube delete --profile brokerservice-monitoring
 ```
 
-**Note:** We don't delete Prometheus or Grafana because they're part of the kube-prometheus-stack and shared across the cluster.
+---
 
 ## Troubleshooting
 
-### Metrics Not Showing in Grafana
+### Metrics Not Appearing in Grafana
 
-If metrics aren't appearing in Grafana, follow this checklist:
-
-**1. Verify Broker Pod is Running**
+**1. Verify the broker pod is running:**
 ```bash
 kubectl get pods -n service-app-project | grep messaging-service
 ```
-Expected: Pod should be in `Running` state, not `CrashLoopBackOff`.
 
-**2. Verify Port 8888 is Accessible**
+**2. Check the broker metrics endpoint (manual, optional):**
+
+The metrics endpoint on port 8888 uses **HTTPS/mTLS** — the same certificate chain
+that Prometheus uses. A plain `curl localhost:8888/metrics` from inside the broker
+container does **not** supply a client certificate and will therefore fail at the
+TLS handshake. This command does **not** replicate the Prometheus scrape.
+
+To verify that Prometheus can actually reach the broker, use the Prometheus Targets
+page instead (see step 4 below). If you do need to make a manual mTLS request,
+you must supply the Prometheus client certificate and the CA:
+
 ```bash
-kubectl exec -n service-app-project messaging-service-ss-0 -- curl -s localhost:8888/metrics | head
+# From a pod that has the prometheus-cert secret mounted — for advanced debugging only.
+# Normal tutorial flow does not require this.
+curl --cacert /path/to/ca.pem \
+     --cert /path/to/tls.crt \
+     --key  /path/to/tls.key \
+     https://messaging-service-ss-0.messaging-service-hdls-svc.service-app-project.svc.cluster.local:8888/metrics \
+     | head -5
 ```
-Expected: Prometheus metrics output. If this fails, the Prometheus agent isn't configured by the Operator.
 
-**3. Check Metrics Service Exists**
-```bash
-kubectl get svc messaging-service-metrics -n service-app-project
-```
-Expected: Service exists with port 8888 exposed.
-
-**4. Verify ServiceMonitor Has the Magic Label**
+**3. Verify the ServiceMonitor has the correct label:**
 ```bash
 kubectl get servicemonitor messaging-service-monitor -n service-app-project -o yaml | grep "release: prometheus"
 ```
-Expected: Should show `release: prometheus` label. This is critical for the default Prometheus to discover it.
 
-**5. Check Prometheus Targets**
-Access Prometheus via port-forward:
+**4. Check Prometheus targets (most useful first step):**
 ```bash
 kubectl port-forward svc/prometheus-kube-prometheus-prometheus \
-  -n service-app-project 9090:9090 > /tmp/prometheus-port-forward.log 2>&1 &
+  -n service-app-project 9090:9090 > /tmp/prometheus-pf.log 2>&1 &
 ```
-Then open http://localhost:9090/targets and verify:
-- Target `serviceMonitor/service-app-project/messaging-service-monitor/0` appears
-- Target state is "UP" (green)
-- Endpoint shows `messaging-service-metrics:8888`
+Open http://localhost:9090/targets and verify `messaging-service-monitor` is `UP`.
 
-**6. Verify Dashboard Was Imported**
-In Grafana UI:
-- Go to Dashboards → Browse
-- Look for "Artemis Broker Metrics"
-- If missing, check the ConfigMap has `grafana_dashboard: "1"` label
+If the target shows an error, the error message itself tells you whether the problem
+is TLS, authentication, DNS, or network — far more useful than a manual curl.
 
-**7. Check Datasource Connection**
-The default Prometheus datasource should work automatically. To verify:
-- Go to Configuration → Data Sources
-- Click on "Prometheus" (the default one)
-- URL should be `http://prometheus-kube-prometheus-prometheus.service-app-project.svc:9090`
-- Click "Save & Test" - should show green checkmark
+**5. Verify the actual metric and job labels:**
 
-**8. Test Queries in Grafana Explore**
-Try these queries:
-```promql
-artemis_total_pending_message_count{pod="messaging-service-ss-0"}
-artemis_total_produced_message_count_total{pod="messaging-service-ss-0"}
+The dashboard and recording rules assume `job="messaging-service-metrics"`. This label
+comes from the `Service` name (`messaging-service-metrics`) via the ServiceMonitor.
+If you renamed the Service, the job label will differ.
+
+In Prometheus, search for `broker_queue_message_count` and inspect the returned labels.
+The `job`, `instance`, and `queue` labels must match what the recording rules and
+dashboard queries use. If `job` is different, update the recording rules and the
+`job=` selectors in the Grafana dashboard queries accordingly.
+
+**6. Verify the Grafana datasource UID:**
+
+The dashboard JSON hard-codes `"uid": "prometheus"`. With `kube-prometheus-stack`
+this is the default UID for the auto-provisioned Prometheus datasource, but it can
+differ if the Helm chart was customised.
+
+To verify:
+```bash
+# Port-forward Grafana if not already open
+kubectl port-forward svc/prometheus-grafana -n service-app-project 3000:80 &
+```
+In Grafana, go to **Connections → Data Sources → Prometheus** and check the UID shown
+in the URL (e.g. `/datasources/edit/prometheus`). If it differs from `prometheus`,
+update the `"uid"` field in the dashboard JSON and re-import.
+
+**7. Check Prometheus cert was found by the Operator:**
+```bash
+kubectl get secret prometheus-cert -n service-app-project
+```
+The Operator adds Prometheus to the broker JAAS allowlist only when a secret named
+exactly `prometheus-cert` exists in the namespace.
+
+### Pipeline Not Flowing
+
+**Check that all four deployments are running:**
+```bash
+kubectl get deployment -n service-app-project
 ```
 
-If these return "No data", the issue is with Prometheus scraping. Go back to step 5.
+**Check for connection errors in any Camel pod:**
+```bash
+kubectl logs -n service-app-project deployment/camel-jms-app --tail=30 | grep -i error
+```
+
+**Verify binding secrets were created:**
+```bash
+kubectl get secret -n service-app-project | grep binding-secret
+```
+You should see `order-generator-binding-secret`, `first-app-binding-secret`, `second-app-binding-secret`, and `third-app-binding-secret`.
