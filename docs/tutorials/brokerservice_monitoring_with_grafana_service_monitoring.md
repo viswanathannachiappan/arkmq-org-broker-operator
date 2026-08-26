@@ -1268,11 +1268,9 @@ spec:
 EOF
 ```
 
-The scrape interval is set to 15 seconds so the queue-depth panels update quickly during the operations scenarios.
-
 ### Create Prometheus Recording Rules
 
-Pre-aggregated rules make the Grafana dashboard queries fast:
+Create a recording rule for the total number of Artemis queue consumers. This keeps the dashboard query simple and provides a stable metric for the "Total Consumer Count" panel:
 
 ```bash {"stage":"monitoring", "label":"create recording rules", "runtime":"bash"}
 kubectl apply -f - <<EOF
@@ -1288,18 +1286,9 @@ spec:
   - name: artemis_aggregations
     interval: 15s
     rules:
-    # Pipeline ingress rate — messages entering via ORDERS.NEW only (not double-counted across stages)
-    - record: artemis:pipeline_ingress_rate
-      expr: rate(broker_queue_messages_added_total{job="messaging-service-metrics",queue="ORDERS.NEW"}[1m])
-    # Active pipeline backlog — excludes ORDERS.DELIVERED (intentionally undrained terminal queue)
-    - record: artemis:pipeline_backlog
-      expr: sum(broker_queue_message_count{job="messaging-service-metrics",queue=~"ORDERS[.](NEW|PROCESSED|SHIPPED)"})
-    # Terminal queue depth — ORDERS.DELIVERED accumulates by design while master-sink is disabled
-    - record: artemis:pipeline_terminal_depth
-      expr: broker_queue_message_count{job="messaging-service-metrics",queue="ORDERS.DELIVERED"}
-    # Total consumers across pipeline queues
-    - record: artemis:pipeline_consumer_count
-      expr: sum(broker_queue_consumer_count{job="messaging-service-metrics",queue=~"ORDERS[.].*"})
+    # Total consumer count across all queues — used by the dashboard "Total Consumer Count" panel
+    - record: artemis:total_consumer_count
+      expr: sum(broker_queue_consumer_count{job="messaging-service-metrics"})
 EOF
 ```
 
@@ -1314,173 +1303,194 @@ kubectl apply -f - <<'EOF'
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: order-pipeline-dashboard
+  name: artemis-broker-health
   namespace: service-app-project
   labels:
     grafana_dashboard: "1"
 data:
-  order-pipeline.json: |
+  artemis-broker-health.json: |
     {
-      "__inputs": [],
-      "__requires": [],
-      "annotations": { "list": [] },
+      "title": "Artemis Broker Operational Health & Performance",
+      "uid": "artemis-broker-health",
+      "style": "dark",
+      "tags": ["artemis", "messaging", "observability"],
+      "timezone": "",
       "editable": true,
-      "gnetId": null,
-      "graphTooltip": 0,
-      "id": null,
-      "links": [],
+      "graphTooltip": 1,
+      "time": { "from": "now-15m", "to": "now" },
+      "timepicker": {},
+      "refresh": "5s",
+      "schemaVersion": 38,
+      "version": 2,
       "panels": [
         {
-          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
-          "title": "Ingress Rate (ORDERS.NEW)",
-          "description": "Messages entering the pipeline per second. Scoped to ORDERS.NEW to avoid double-counting across pipeline stages.",
-          "type": "stat",
+          "id": 100, "title": "Row 1: Broker Overview", "type": "row",
+          "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+        },
+        {
+          "id": 1, "title": "Broker Pod Ready", "type": "stat",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "targets": [
-            {
-              "expr": "artemis:pipeline_ingress_rate",
-              "refId": "A"
+          "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
+          "targets": [{ "expr": "sum(kube_pod_status_ready{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",condition=\"true\"})", "refId": "A" }],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short", "min": 0, "max": 1,
+              "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] },
+              "mappings": [{ "type": "value", "options": { "0": { "text": "NOT READY", "color": "red" }, "1": { "text": "HEALTHY", "color": "green" } } }]
             }
-          ],
+          },
+          "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "orientation": "auto", "textMode": "auto", "colorMode": "background" }
+        },
+        {
+          "id": 2, "title": "Broker Ready Replicas", "type": "stat",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 6, "w": 6, "x": 6, "y": 1 },
+          "targets": [{ "expr": "kube_statefulset_status_replicas_ready{namespace=\"service-app-project\",statefulset=\"messaging-service-ss\"}", "refId": "A" }],
           "fieldConfig": {
             "defaults": {
               "unit": "short",
               "color": { "mode": "thresholds" },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  { "color": "green", "value": null },
-                  { "color": "yellow", "value": 40 },
-                  { "color": "red", "value": 80 }
-                ]
-              }
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
             }
-          }
+          },
+          "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "orientation": "auto", "textMode": "auto", "colorMode": "value" }
         },
         {
-          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
-          "title": "Active Pipeline Backlog",
-          "description": "Messages waiting in NEW, PROCESSED, and SHIPPED queues. ORDERS.DELIVERED is excluded — it accumulates intentionally while master-sink is disabled. A spike here means a processing stage is behind.",
-          "type": "stat",
+          "id": 3, "title": "Total Queue Messages", "type": "stat",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "targets": [
-            {
-              "expr": "artemis:pipeline_backlog",
-              "refId": "A"
-            }
-          ],
+          "gridPos": { "h": 6, "w": 6, "x": 12, "y": 1 },
+          "targets": [{ "expr": "sum(broker_queue_message_count{job=\"messaging-service-metrics\"})", "refId": "A" }],
           "fieldConfig": {
             "defaults": {
               "unit": "short",
               "color": { "mode": "thresholds" },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  { "color": "green", "value": null },
-                  { "color": "yellow", "value": 100 },
-                  { "color": "red", "value": 500 }
-                ]
-              }
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1000 }, { "color": "red", "value": 5000 }] }
             }
-          }
+          },
+          "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "orientation": "auto", "textMode": "auto", "colorMode": "value" }
         },
         {
-          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
-          "title": "Active Pipeline Consumers",
-          "description": "Total JMS consumers connected across all ORDERS.* queues.",
-          "type": "stat",
+          "id": 4, "title": "Backlog With No Consumers", "type": "stat",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "targets": [
-            {
-              "expr": "artemis:pipeline_consumer_count",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": { "defaults": { "unit": "short" } }
-        },
-        {
-          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
-          "title": "Broker Container Working Set",
-          "description": "Kubernetes working-set memory for the broker container. This is the value compared against the container memory limit — not the JVM heap size.",
-          "type": "stat",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "targets": [
-            {
-              "expr": "sum(container_memory_working_set_bytes{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\"})",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": { "defaults": { "unit": "bytes" } }
-        },
-        {
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
-          "title": "Queue Depth per Stage",
-          "description": "Watch ORDERS.PROCESSED grow when shipping-service-app is the bottleneck.",
-          "type": "timeseries",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "targets": [
-            {
-              "expr": "broker_queue_message_count{job=\"messaging-service-metrics\",queue=~\"ORDERS[.].*\"}",
-              "legendFormat": "{{queue}}",
-              "refId": "A"
-            }
-          ],
+          "gridPos": { "h": 6, "w": 6, "x": 18, "y": 1 },
+          "targets": [{ "expr": "sum(broker_queue_message_count{job=\"messaging-service-metrics\"} and on(queue, instance) (broker_queue_consumer_count{job=\"messaging-service-metrics\"} == 0))", "refId": "A" }],
           "fieldConfig": {
             "defaults": {
               "unit": "short",
-              "custom": { "lineWidth": 2 }
+              "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 1000 }] }
             }
-          }
+          },
+          "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "orientation": "auto", "textMode": "auto", "colorMode": "background" }
         },
         {
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
-          "title": "Consumer Count per Queue",
-          "description": "Scale shipping-service-app and watch the consumer count for ORDERS.PROCESSED increase.",
-          "type": "timeseries",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "targets": [
-            {
-              "expr": "broker_queue_consumer_count{job=\"messaging-service-metrics\",queue=~\"ORDERS[.].*\"}",
-              "legendFormat": "{{queue}}",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": { "defaults": { "unit": "short" } }
+          "id": 200, "title": "Row 2: Queue Overview", "type": "row",
+          "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 }
         },
         {
-          "gridPos": { "h": 4, "w": 12, "x": 0, "y": 12 },
-          "title": "Terminal Queue Depth (ORDERS.DELIVERED)",
-          "description": "Expected to grow while master-sink is disabled (replicas=0). Scale master-sink up to drain it. Growing depth here is normal — it is not a pipeline bottleneck.",
-          "type": "timeseries",
+          "id": 5, "title": "Queue Message Count", "type": "timeseries",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "targets": [
-            {
-              "expr": "artemis:pipeline_terminal_depth",
-              "legendFormat": "ORDERS.DELIVERED",
-              "refId": "A"
-            }
-          ],
+          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 8 },
+          "targets": [{ "expr": "sum by (queue) (broker_queue_message_count{job=\"messaging-service-metrics\"})", "legendFormat": "{{queue}}", "refId": "A" }],
+          "fieldConfig": { "defaults": { "unit": "short", "min": 0 } },
+          "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+        },
+        {
+          "id": 6, "title": "Queue Backlog Growth", "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 8 },
+          "targets": [{ "expr": "sum by (queue) (deriv(broker_queue_message_count{job=\"messaging-service-metrics\"}[10m]))", "legendFormat": "{{queue}}", "refId": "A" }],
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+        },
+        {
+          "id": 300, "title": "Row 3: Queue Processing", "type": "row",
+          "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 }
+        },
+        {
+          "id": 7, "title": "Queue Consumer Count", "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 8, "x": 0, "y": 16 },
+          "targets": [{ "expr": "sum by (queue) (broker_queue_consumer_count{job=\"messaging-service-metrics\"})", "legendFormat": "{{queue}}", "refId": "A" }],
+          "fieldConfig": { "defaults": { "unit": "short", "min": 0 } }
+        },
+        {
+          "id": 8, "title": "Messages Being Delivered", "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 8, "x": 8, "y": 16 },
+          "targets": [{ "expr": "sum by (queue) (broker_queue_delivering_count{job=\"messaging-service-metrics\"})", "legendFormat": "{{queue}}", "refId": "A" }],
+          "fieldConfig": { "defaults": { "unit": "short", "min": 0 } }
+        },
+        {
+          "id": 9, "title": "Queue Persistent Size", "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 8, "x": 16, "y": 16 },
+          "targets": [{ "expr": "sum by (queue) (broker_queue_persistent_size{job=\"messaging-service-metrics\"})", "legendFormat": "{{queue}}", "refId": "A" }],
+          "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } }
+        },
+        {
+          "id": 400, "title": "Row 4: Broker Resource Health", "type": "row",
+          "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 }
+        },
+        {
+          "id": 10, "title": "Total Consumer Count", "type": "stat",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 6, "w": 6, "x": 0, "y": 24 },
+          "targets": [{ "expr": "artemis:total_consumer_count", "refId": "A" }],
+          "fieldConfig": { "defaults": { "unit": "short", "min": 0 } },
+          "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "orientation": "auto", "textMode": "auto", "colorMode": "value" }
+        },
+        {
+          "id": 11, "title": "Container CPU Usage", "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 6, "x": 6, "y": 24 },
+          "targets": [{ "expr": "sum(rate(container_cpu_usage_seconds_total{pod=~\"messaging-service-ss-.*\",container!=\"POD\",container!=\"\"}[5m]))", "legendFormat": "CPU Cores", "refId": "A" }],
+          "fieldConfig": { "defaults": { "unit": "cores", "min": 0 } }
+        },
+        {
+          "id": 12, "title": "Container Memory Working Set %", "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 6, "x": 12, "y": 24 },
+          "targets": [{ "expr": "100 * sum(container_memory_working_set_bytes{pod=~\"messaging-service-ss-.*\",container!=\"POD\",container!=\"\"}) / sum(kube_pod_container_resource_limits{pod=~\"messaging-service-ss-.*\",resource=\"memory\",unit=\"byte\"})", "legendFormat": "Memory % of Limit", "refId": "A" }],
           "fieldConfig": {
             "defaults": {
-              "unit": "short",
-              "color": { "fixedColor": "blue", "mode": "fixed" },
-              "custom": { "lineWidth": 2 }
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 70 }, { "color": "red", "value": 85 }] }
             }
           }
+        },
+        {
+          "id": 13, "title": "JVM Heap Utilization %", "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 6, "x": 18, "y": 24 },
+          "targets": [{ "expr": "100 * sum(jvm_memory_used_bytes{job=\"messaging-service-metrics\",area=\"heap\"}) / sum(jvm_memory_max_bytes{job=\"messaging-service-metrics\",area=\"heap\"})", "legendFormat": "Heap % Used", "refId": "A" }],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 70 }, { "color": "red", "value": 85 }] }
+            }
+          }
+        },
+        {
+          "id": 500, "title": "Row 5: JVM Details", "type": "row",
+          "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 }
+        },
+        {
+          "id": 14, "title": "JVM Heap Used", "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 32 },
+          "targets": [{ "expr": "sum(jvm_memory_used_bytes{job=\"messaging-service-metrics\",area=\"heap\"})", "legendFormat": "Heap Used", "refId": "A" }],
+          "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } }
+        },
+        {
+          "id": 15, "title": "JVM Heap Max", "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 32 },
+          "targets": [{ "expr": "sum(jvm_memory_max_bytes{job=\"messaging-service-metrics\",area=\"heap\"})", "legendFormat": "Heap Max", "refId": "A" }],
+          "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } }
         }
-      ],
-      "refresh": "10s",
-      "schemaVersion": 38,
-      "style": "dark",
-      "tags": ["artemis", "messaging", "pipeline"],
-      "templating": { "list": [] },
-      "time": { "from": "now-10m", "to": "now" },
-      "timepicker": {},
-      "timezone": "",
-      "title": "Order Processing Pipeline",
-      "uid": "order-pipeline",
-      "version": 1,
-      "weekStart": ""
+      ]
     }
 EOF
 ```
@@ -1524,17 +1534,23 @@ echo "Grafana available at http://grafana.brokerservice-monitoring.local"
 kubectl get secret prometheus-grafana -n service-app-project -o jsonpath='{.data.admin-password}' | base64 -d && echo
 ```
 
-Login at **http://grafana.brokerservice-monitoring.local** with username `admin` and the password printed above, then open the **"Order Processing Pipeline"** dashboard.
+Login at **http://grafana.brokerservice-monitoring.local** with username `admin` and the password printed above, then open the **"Artemis Broker Operational Health & Performance"** dashboard.
 
 Under normal conditions (5 msg/s, all consumers healthy) you should see:
 
 | Panel | Expected value |
 |---|---|
-| Ingress Rate (ORDERS.NEW) | ~5 msg/s |
-| Active Pipeline Backlog | ~0 |
-| Terminal Queue Depth (ORDERS.DELIVERED) | Growing — expected while master-sink is disabled |
-| Active Pipeline Consumers | ~3 |
-| Queue Depth per Stage | NEW/PROCESSED/SHIPPED near zero; DELIVERED growing |
+| Broker Pod Ready | `1` / HEALTHY |
+| Broker Ready Replicas | `1` |
+| Total Queue Messages | Low — dominated by `ORDERS.DELIVERED` which grows intentionally |
+| Backlog With No Consumers | Reflects `ORDERS.DELIVERED` depth — growing while `master-sink` is disabled |
+| Queue Message Count | `ORDERS.NEW`, `ORDERS.PROCESSED`, `ORDERS.SHIPPED` near zero; `ORDERS.DELIVERED` growing |
+| Queue Consumer Count | ~1 consumer on each active processing queue |
+| Messages Being Delivered | Activity visible while messages are in flight |
+| Total Consumer Count | ~3 |
+| Container CPU Usage | Low and stable |
+| Container Memory Working Set % | Stable and below 70% |
+| JVM Heap Utilization % | Stable and below 70% |
 
 A growing `ORDERS.DELIVERED` queue is expected and does not indicate a pipeline failure — `master-sink` is intentionally disabled. Because `master-sink` starts at 0 replicas, `ORDERS.DELIVERED` accumulates at approximately 5 messages/sec. After about 20 seconds it should contain roughly 100 messages — a useful sanity check that the full pipeline is flowing end-to-end.
 
@@ -1590,7 +1606,7 @@ ORDERS.PROCESSED queue depth
         └──────────────────► time
 ```
 
-The `Queue Depth per Stage` panel shows `ORDERS.PROCESSED` climbing while the other queues stay flat. This is the bottleneck made visible.
+The `Queue Message Count` panel shows `ORDERS.PROCESSED` climbing while the other queues stay flat. This is the bottleneck made visible.
 
 ### Scenario 3 — Scale to Recover
 
@@ -1640,7 +1656,7 @@ ORDERS.PROCESSED queue depth
         +-------------------> time
 ```
 
-The `Consumer Count per Queue` panel shows `ORDERS.PROCESSED` consumer count jump from 1 to 5, and the `Active Pipeline Backlog` stat drop back toward zero.
+Because `CONSUMER_CONCURRENCY=1`, the five shipping replicas create five JMS consumers on `ORDERS.PROCESSED`. The `Queue Consumer Count` panel shows that jump from 1 to 5, and `Total Queue Messages` drops back toward zero.
 
 **The operational story:**
 
