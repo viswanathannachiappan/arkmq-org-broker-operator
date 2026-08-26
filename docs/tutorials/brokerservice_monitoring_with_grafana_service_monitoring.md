@@ -48,7 +48,7 @@ This tutorial deploys a realistic event-driven order-processing pipeline and sho
           BrokerService → Prometheus → Grafana
 ```
 
-**One reusable Camel image, four pipeline roles.**
+**One reusable Camel image, four application roles.**
 The same container image (`camel-jms-app`) is deployed four times for the core pipeline. An optional fifth deployment, `master-sink`, can drain the terminal queue when needed.
 Role and queue configuration come from environment variables.
 
@@ -66,6 +66,9 @@ The Kubernetes Deployment name and BrokerApp identity are the same — the busin
 - A running Kubernetes cluster (this tutorial uses `minikube`)
 - `kubectl` configured to interact with your cluster
 - `helm` installed for deploying monitoring components
+- The Camel pipeline image `quay.io/rh-ee-vnachiap/camel-jms-app:pipeline-1.0` must be pullable from your cluster.
+
+> **Naming note:** Throughout this tutorial the optional terminal consumer is called `master-sink` as a conceptual role. The corresponding Kubernetes resources use more specific names: the BrokerApp is `master-sink-app`, and the Camel Deployment is `camel-jms-master-sink`.
 
 ---
 
@@ -74,8 +77,12 @@ The Kubernetes Deployment name and BrokerApp identity are the same — the busin
 ### Start Minikube
 
 ```bash {"stage":"init", "id":"minikube_start", "runtime":"bash"}
-minikube start --profile brokerservice-monitoring --cpus 8 --memory 8192 --disk-size 8000
-minikube profile brokerservice-monitoring
+minikube start \
+  --profile brokerservice-monitoring \
+  --cpus 2 \
+  --memory 8192 \
+  --disk-size 20000
+minikube addons enable ingress --profile brokerservice-monitoring
 ```
 
 ### Create Namespace
@@ -88,7 +95,7 @@ kubectl config set-context --current --namespace=service-app-project
 ### Install Cert-Manager
 
 ```bash {"stage":"init", "label":"install cert-manager", "runtime":"bash"}
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.15.1/cert-manager.yaml
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.5/cert-manager.yaml
 ```
 
 Wait for `cert-manager` to be ready:
@@ -291,14 +298,16 @@ metadata:
 spec:
   resources:
     requests:
-      memory: "2Gi"
+      memory: "1Gi"
     limits:
-      memory: "2Gi"
+      memory: "1Gi"
   env:
     - name: JAVA_ARGS_APPEND
       value: "-Dlog4j2.level=INFO"
 EOF
 ```
+
+> The broker is configured with 1 GiB of memory for this tutorial workload. The memory request and limit are intentionally set to the same value.
 
 ```bash {"stage":"deploy_service", "label":"wait for brokerservice", "runtime":"bash"}
 kubectl wait BrokerService messaging-service -n service-app-project --for=condition=Ready --timeout=300s
@@ -718,7 +727,7 @@ Each deployment mounts its own app certificate at `/app/tls/client`. All four de
 
 ### order-generator
 
-Produces 5 realistic order JSON messages per second into `ORDERS.NEW`. The generator has its own `BrokerApp` identity (`order-generator`) with a single `producerOf: ORDERS.NEW` capability.
+Produces 5 order messages per second into `ORDERS.NEW`. The rate is controlled by the `MESSAGE_RATE` environment variable in the Camel Deployment — the BrokerApp only declares the messaging capability (`producerOf: ORDERS.NEW`). To change the rate without rebuilding the image:
 
 Wait for the `order-generator` binding secret before deploying:
 
@@ -1165,9 +1174,11 @@ You should see log lines like:
 
 ## 6. Configure Prometheus Monitoring
 
+> **How broker metrics work:** The ArkMQ Operator automatically configures the Prometheus Java agent for every `BrokerService`, exposing broker metrics on port 8888. This is a `BrokerService`-level concern — individual `BrokerApp` resources do not configure metrics. This section creates a Kubernetes `Service` for the metrics port and a `ServiceMonitor` so Prometheus can discover and scrape it.
+
 ### Create Prometheus Client Certificate
 
-**CRITICAL:** The certificate secret must be named exactly `prometheus-cert`. The ArkMQ Operator looks for this specific name to add the Prometheus identity to the broker's access control list.
+Create the Prometheus client certificate. The Operator uses `prometheus-cert` as the default Prometheus client certificate secret name; it uses the certificate's Common Name to grant Prometheus access to the broker metrics endpoint.
 
 ```bash {"stage":"monitoring", "label":"create prometheus cert", "runtime":"bash"}
 kubectl apply -f - <<EOF
@@ -1214,7 +1225,11 @@ EOF
 ### Create ServiceMonitor
 
 ```bash {"stage":"monitoring", "label":"set broker fqdn", "runtime":"bash"}
-export BROKER_FQDN=messaging-service-ss-0.messaging-service-hdls-svc.service-app-project.svc.cluster.local
+export BROKER_POD=$(kubectl get pods \
+  -n service-app-project \
+  -l ActiveMQArtemis=messaging-service \
+  -o jsonpath='{.items[0].metadata.name}')
+export BROKER_FQDN="${BROKER_POD}.messaging-service-hdls-svc.service-app-project.svc.cluster.local"
 echo "Broker FQDN: ${BROKER_FQDN}"
 ```
 
@@ -1276,245 +1291,254 @@ spec:
     # Pipeline ingress rate — messages entering via ORDERS.NEW only (not double-counted across stages)
     - record: artemis:pipeline_ingress_rate
       expr: rate(broker_queue_messages_added_total{job="messaging-service-metrics",queue="ORDERS.NEW"}[1m])
-    # Total messages currently waiting across all pipeline queues
+    # Active pipeline backlog — excludes ORDERS.DELIVERED (intentionally undrained terminal queue)
     - record: artemis:pipeline_backlog
-      expr: sum(broker_queue_message_count{job="messaging-service-metrics",queue=~"ORDERS[.].*"})
+      expr: sum(broker_queue_message_count{job="messaging-service-metrics",queue=~"ORDERS[.](NEW|PROCESSED|SHIPPED)"})
+    # Terminal queue depth — ORDERS.DELIVERED accumulates by design while master-sink is disabled
+    - record: artemis:pipeline_terminal_depth
+      expr: broker_queue_message_count{job="messaging-service-metrics",queue="ORDERS.DELIVERED"}
     # Total consumers across pipeline queues
     - record: artemis:pipeline_consumer_count
       expr: sum(broker_queue_consumer_count{job="messaging-service-metrics",queue=~"ORDERS[.].*"})
 EOF
 ```
 
-> **Troubleshooting metric names:** If your dashboard panels show "No data", the metric names exposed by your operator version may differ. Check what is available via Prometheus UI at http://localhost:9090 (after port-forwarding) by searching for `broker_queue`. Update the recording rule expressions and dashboard queries to match.
-
 ---
 
 ## 7. Create Grafana Dashboard
 
-The dashboard is built around six panels that tell the operational story: throughput in, queue depth per stage, consumer count, and broker resources.
+The dashboard is provisioned as a Kubernetes `ConfigMap` with the `grafana_dashboard: "1"` label. The Grafana sidecar — already configured in Section 2 — watches for ConfigMaps with that label and automatically loads them. No Helm upgrade or Grafana restart is required.
 
-```bash {"stage":"grafana", "label":"create dashboard and apply via helm", "runtime":"bash"}
-cat << 'EOF' > grafana-complete-values.yaml
-grafana:
-  sidecar:
-    dashboards:
-      enabled: true
-      label: grafana_dashboard
-      searchNamespace: ALL
-    datasources:
-      enabled: true
-  dashboards:
-    default:
-      artemis-order-pipeline:
-        json: |
-          {
-            "__inputs": [],
-            "__requires": [],
-            "annotations": { "list": [] },
-            "editable": true,
-            "gnetId": null,
-            "graphTooltip": 0,
-            "id": null,
-            "links": [],
-            "panels": [
-              {
-                "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
-                "title": "Ingress Rate (ORDERS.NEW)",
-                "description": "Messages entering the pipeline per second. Scoped to ORDERS.NEW to avoid double-counting across pipeline stages.",
-                "type": "stat",
-                "datasource": { "type": "prometheus", "uid": "prometheus" },
-                "targets": [
-                  {
-                    "expr": "artemis:pipeline_ingress_rate",
-                    "refId": "A"
-                  }
-                ],
-                "fieldConfig": {
-                  "defaults": {
-                    "unit": "short",
-                    "color": { "mode": "thresholds" },
-                    "thresholds": {
-                      "mode": "absolute",
-                      "steps": [
-                        { "color": "green", "value": null },
-                        { "color": "yellow", "value": 40 },
-                        { "color": "red", "value": 80 }
-                      ]
-                    }
-                  }
-                }
-              },
-              {
-                "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
-                "title": "Total Messages Across Pipeline Queues",
-                "description": "Sum of messages waiting in all ORDERS.* queues. A spike here means at least one stage is behind.",
-                "type": "stat",
-                "datasource": { "type": "prometheus", "uid": "prometheus" },
-                "targets": [
-                  {
-                    "expr": "artemis:pipeline_backlog",
-                    "refId": "A"
-                  }
-                ],
-                "fieldConfig": {
-                  "defaults": {
-                    "unit": "short",
-                    "color": { "mode": "thresholds" },
-                    "thresholds": {
-                      "mode": "absolute",
-                      "steps": [
-                        { "color": "green", "value": null },
-                        { "color": "yellow", "value": 100 },
-                        { "color": "red", "value": 500 }
-                      ]
-                    }
-                  }
-                }
-              },
-              {
-                "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
-                "title": "Active Pipeline Consumers",
-                "description": "Total JMS consumers connected across all ORDERS.* queues.",
-                "type": "stat",
-                "datasource": { "type": "prometheus", "uid": "prometheus" },
-                "targets": [
-                  {
-                    "expr": "artemis:pipeline_consumer_count",
-                    "refId": "A"
-                  }
-                ],
-                "fieldConfig": { "defaults": { "unit": "short" } }
-              },
-              {
-                "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
-                "title": "Broker Pod Memory",
-                "description": "Kubernetes working set memory for the broker pod. Not the same as Artemis JVM heap.",
-                "type": "stat",
-                "datasource": { "type": "prometheus", "uid": "prometheus" },
-                "targets": [
-                  {
-                    "expr": "sum(container_memory_working_set_bytes{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\"})",
-                    "refId": "A"
-                  }
-                ],
-                "fieldConfig": { "defaults": { "unit": "bytes" } }
-              },
-              {
-                "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
-                "title": "Queue Depth per Stage",
-                "description": "Watch ORDERS.PROCESSED grow when shipping is the bottleneck.",
-                "type": "timeseries",
-                "datasource": { "type": "prometheus", "uid": "prometheus" },
-                "targets": [
-                  {
-                    "expr": "broker_queue_message_count{job=\"messaging-service-metrics\",queue=~\"ORDERS[.].*\"}",
-                    "legendFormat": "{{queue}}",
-                    "refId": "A"
-                  }
-                ],
-                "fieldConfig": {
-                  "defaults": {
-                    "unit": "short",
-                    "custom": { "lineWidth": 2 }
-                  }
-                }
-              },
-              {
-                "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
-                "title": "Consumer Count per Queue",
-                "description": "Scale shipping-service-app and watch the consumer count for ORDERS.PROCESSED increase.",
-                "type": "timeseries",
-                "datasource": { "type": "prometheus", "uid": "prometheus" },
-                "targets": [
-                  {
-                    "expr": "broker_queue_consumer_count{job=\"messaging-service-metrics\",queue=~\"ORDERS[.].*\"}",
-                    "legendFormat": "{{queue}}",
-                    "refId": "A"
-                  }
-                ],
-                "fieldConfig": { "defaults": { "unit": "short" } }
+```bash {"stage":"grafana", "label":"create dashboard configmap", "runtime":"bash"}
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-pipeline-dashboard
+  namespace: service-app-project
+  labels:
+    grafana_dashboard: "1"
+data:
+  order-pipeline.json: |
+    {
+      "__inputs": [],
+      "__requires": [],
+      "annotations": { "list": [] },
+      "editable": true,
+      "gnetId": null,
+      "graphTooltip": 0,
+      "id": null,
+      "links": [],
+      "panels": [
+        {
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+          "title": "Ingress Rate (ORDERS.NEW)",
+          "description": "Messages entering the pipeline per second. Scoped to ORDERS.NEW to avoid double-counting across pipeline stages.",
+          "type": "stat",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "artemis:pipeline_ingress_rate",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": { "mode": "thresholds" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 40 },
+                  { "color": "red", "value": 80 }
+                ]
               }
-            ],
-            "refresh": "10s",
-            "schemaVersion": 38,
-            "style": "dark",
-            "tags": ["artemis", "messaging", "pipeline"],
-            "templating": { "list": [] },
-            "time": { "from": "now-10m", "to": "now" },
-            "timepicker": {},
-            "timezone": "",
-            "title": "Order Processing Pipeline",
-            "uid": "order-pipeline",
-            "version": 1,
-            "weekStart": ""
+            }
           }
-kubeControllerManager:
-  enabled: false
-kubeEtcd:
-  enabled: false
-kubeScheduler:
-  enabled: false
+        },
+        {
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+          "title": "Active Pipeline Backlog",
+          "description": "Messages waiting in NEW, PROCESSED, and SHIPPED queues. ORDERS.DELIVERED is excluded — it accumulates intentionally while master-sink is disabled. A spike here means a processing stage is behind.",
+          "type": "stat",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "artemis:pipeline_backlog",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": { "mode": "thresholds" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 100 },
+                  { "color": "red", "value": 500 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+          "title": "Active Pipeline Consumers",
+          "description": "Total JMS consumers connected across all ORDERS.* queues.",
+          "type": "stat",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "artemis:pipeline_consumer_count",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "short" } }
+        },
+        {
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+          "title": "Broker Container Working Set",
+          "description": "Kubernetes working-set memory for the broker container. This is the value compared against the container memory limit — not the JVM heap size.",
+          "type": "stat",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "sum(container_memory_working_set_bytes{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\"})",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "bytes" } }
+        },
+        {
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+          "title": "Queue Depth per Stage",
+          "description": "Watch ORDERS.PROCESSED grow when shipping-service-app is the bottleneck.",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "broker_queue_message_count{job=\"messaging-service-metrics\",queue=~\"ORDERS[.].*\"}",
+              "legendFormat": "{{queue}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": { "lineWidth": 2 }
+            }
+          }
+        },
+        {
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+          "title": "Consumer Count per Queue",
+          "description": "Scale shipping-service-app and watch the consumer count for ORDERS.PROCESSED increase.",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "broker_queue_consumer_count{job=\"messaging-service-metrics\",queue=~\"ORDERS[.].*\"}",
+              "legendFormat": "{{queue}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "short" } }
+        },
+        {
+          "gridPos": { "h": 4, "w": 12, "x": 0, "y": 12 },
+          "title": "Terminal Queue Depth (ORDERS.DELIVERED)",
+          "description": "Expected to grow while master-sink is disabled (replicas=0). Scale master-sink up to drain it. Growing depth here is normal — it is not a pipeline bottleneck.",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "artemis:pipeline_terminal_depth",
+              "legendFormat": "ORDERS.DELIVERED",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": { "fixedColor": "blue", "mode": "fixed" },
+              "custom": { "lineWidth": 2 }
+            }
+          }
+        }
+      ],
+      "refresh": "10s",
+      "schemaVersion": 38,
+      "style": "dark",
+      "tags": ["artemis", "messaging", "pipeline"],
+      "templating": { "list": [] },
+      "time": { "from": "now-10m", "to": "now" },
+      "timepicker": {},
+      "timezone": "",
+      "title": "Order Processing Pipeline",
+      "uid": "order-pipeline",
+      "version": 1,
+      "weekStart": ""
+    }
 EOF
-
-helm upgrade prometheus prometheus-community/kube-prometheus-stack \
-  -n service-app-project \
-  -f grafana-complete-values.yaml \
-  --wait
-```
-
-```bash {"stage":"grafana", "label":"restart grafana", "runtime":"bash"}
-kubectl rollout restart deployment/prometheus-grafana -n service-app-project
-kubectl rollout status deployment/prometheus-grafana -n service-app-project --timeout=120s
 ```
 
 ### Access Grafana
 
-```bash {"stage":"grafana", "label":"port forward grafana", "runtime":"bash"}
-pkill -f "port-forward svc/prometheus-grafana" 2>/dev/null || true
-sleep 1
-kubectl port-forward svc/prometheus-grafana \
-  -n service-app-project 3000:80 > /tmp/grafana-port-forward.log 2>&1 &
-sleep 3
-echo "Grafana available at http://localhost:3000"
+Create an Ingress to expose Grafana through the Minikube ingress controller (this tutorial uses the NGINX addon enabled at cluster start):
+
+```bash {"stage":"grafana", "label":"create grafana ingress", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana
+  namespace: service-app-project
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: grafana.brokerservice-monitoring.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: prometheus-grafana
+                port:
+                  number: 80
+EOF
+```
+
+Add the Minikube IP to your `/etc/hosts` so the hostname resolves locally:
+
+```bash {"stage":"grafana", "label":"configure hosts", "runtime":"bash"}
+export CLUSTER_IP=$(minikube ip --profile brokerservice-monitoring)
+echo "${CLUSTER_IP} grafana.brokerservice-monitoring.local" | sudo tee -a /etc/hosts
+echo "Grafana available at http://grafana.brokerservice-monitoring.local"
 ```
 
 ```bash {"stage":"grafana", "label":"get grafana password", "runtime":"bash"}
 kubectl get secret prometheus-grafana -n service-app-project -o jsonpath='{.data.admin-password}' | base64 -d && echo
 ```
 
-Login with username `admin` and the password printed above, then open the **"Order Processing Pipeline"** dashboard.
+Login at **http://grafana.brokerservice-monitoring.local** with username `admin` and the password printed above, then open the **"Order Processing Pipeline"** dashboard.
 
 Under normal conditions (5 msg/s, all consumers healthy) you should see:
 
 | Panel | Expected value |
 |---|---|
 | Ingress Rate (ORDERS.NEW) | ~5 msg/s |
-| Total Messages Across Pipeline Queues | ~0 (except ORDERS.DELIVERED — see below) |
-| Active Pipeline Consumers | ~3 (see breakdown below) |
-| Queue Depth per Stage | NEW/PROCESSED/SHIPPED flat near zero; DELIVERED growing |
+| Active Pipeline Backlog | ~0 |
+| Terminal Queue Depth (ORDERS.DELIVERED) | Growing — expected while master-sink is disabled |
+| Active Pipeline Consumers | ~3 |
+| Queue Depth per Stage | NEW/PROCESSED/SHIPPED near zero; DELIVERED growing |
 
-**Why `ORDERS.DELIVERED` grows under normal conditions?** `master-sink` starts at **0 replicas** — there is deliberately no consumer on the terminal queue. `ORDERS.DELIVERED` will accumulate at ~5 msg/s. This is expected and useful: after ~20 seconds you should see a depth of roughly 100, proving the full pipeline is working end-to-end.
+A growing `ORDERS.DELIVERED` queue is expected and does not indicate a pipeline failure — `master-sink` is intentionally disabled. Because `master-sink` starts at 0 replicas, `ORDERS.DELIVERED` accumulates at approximately 5 messages/sec. After about 20 seconds it should contain roughly 100 messages — a useful sanity check that the full pipeline is flowing end-to-end.
 
-**Why ~3 consumers, not 4 applications?** The generator is producer-only (0 JMS consumers). `master-sink` starts at 0 replicas (0 consumers). Each processing stage opens one JMS session:
-
-| Deployment | `CONSUMER_CONCURRENCY` | JMS consumers |
-|---|---|---|
-| order-processor-app | 1 | 1 |
-| shipping-service-app | 1 | 1 |
-| delivery-service-app | 1 | 1 |
-| **Total** | | **3** |
-
-> **Note:** This assumes all configured JMS sessions are connected. Verify the actual count in Prometheus by searching for `broker_queue_consumer_count` and inspecting the `queue` and `job` labels.
-
-**Why the pipeline keeps up at baseline (theoretical capacities):**
-
-| Stage | Delay | Concurrency | Theoretical max | Headroom vs 5 msg/s |
-|---|---|---|---|---|
-| processor | 100 ms | 1 | ~10 msg/s | 2x |
-| shipping | 25 ms | 1 | ~40 msg/s | 8x |
-| delivery | 25 ms | 1 | ~40 msg/s | 8x |
-
-These are upper bounds assuming negligible JMS overhead. Every stage has comfortable headroom above the 5 msg/s generator rate.
+The expected baseline is three JMS consumers: one each for processor, shipping, and delivery. The generator is producer-only and `master-sink` starts with zero replicas.
 
 ---
 
@@ -1526,17 +1550,15 @@ These three scenarios are the purpose of the tutorial. Each one creates or resol
 
 Everything is already running. Open the dashboard and confirm the pipeline is flowing at 5 msg/s.
 
-```
-Generator: 5 msg/s
+Each stage has comfortable headroom at the baseline rate:
 
-processor (1x, 100 ms)  theoretical max ~10 msg/s  ->  ORDERS.PROCESSED  depth ~= 0
-shipping  (1x,  25 ms)  theoretical max ~40 msg/s  ->  ORDERS.SHIPPED    depth ~= 0
-delivery  (1x,  25 ms)  theoretical max ~40 msg/s  ->  ORDERS.DELIVERED  growing (no consumer)
-```
+| Stage | Delay | Consumers | Approx. capacity |
+|---|---|---|---|
+| processor | 100 ms | 1 | ~10 msg/s |
+| shipping | 25 ms | 1 | ~40 msg/s |
+| delivery | 25 ms | 1 | ~40 msg/s |
 
-**What to observe:** `ORDERS.NEW`, `ORDERS.PROCESSED`, and `ORDERS.SHIPPED` remain near zero. `ORDERS.DELIVERED` grows steadily because `master-sink` is intentionally disabled. Consumer count is stable (~3 at baseline — see consumer breakdown in the dashboard section above).
-
-After ~20 seconds at 5 msg/s, `ORDERS.DELIVERED` should show a depth of roughly 100. That proves the full pipeline is flowing correctly end-to-end. To drain it at any point, scale up `master-sink`:
+**What to observe:** `ORDERS.NEW`, `ORDERS.PROCESSED`, and `ORDERS.SHIPPED` remain near zero. `ORDERS.DELIVERED` grows steadily because `master-sink` is intentionally disabled. To drain it at any point:
 
 ```bash
 kubectl scale deployment camel-jms-master-sink --replicas=1 -n service-app-project
@@ -1553,7 +1575,7 @@ kubectl set env deployment/shipping-service-app \
 kubectl rollout status deployment/shipping-service-app -n service-app-project --timeout=120s
 ```
 
-With `PROCESSING_DELAY_MS=2000` and `CONSUMER_CONCURRENCY=1`, the shipping service can process at most **0.5 msg/s** (theoretical). The generator is still producing 5 msg/s. Under idealized conditions `ORDERS.PROCESSED` should accumulate at roughly **4.5 messages per second** (5 − 0.5). The actual rate depends on JMS overhead and scheduling, but the growth will be clearly visible in Grafana within seconds.
+With `PROCESSING_DELAY_MS=2000` and `CONSUMER_CONCURRENCY=1`, the shipping service can process at most **0.5 msg/s** (theoretical). The generator is still producing 5 msg/s, so under idealized conditions `ORDERS.PROCESSED` should accumulate at roughly **4.5 messages per second** (5 − 0.5). The actual rate depends on JMS overhead and scheduling, but the growth will be clearly visible in Grafana within seconds.
 
 **What to observe in Grafana:**
 
@@ -1584,7 +1606,7 @@ kubectl wait deployment shipping-service-app \
   --timeout=300s
 ```
 
-Scaling gives you five consumers, but they still have the 2-second processing delay — so aggregate throughput is still only ~2.5 msg/s at this point. The next step restores the 25 ms delay; after that rollout completes, aggregate theoretical capacity rises to ~200 msg/s, far exceeding the 5 msg/s input rate, and the backlog clears quickly:
+Scaling gives you five consumers, but they still have the 2-second processing delay — so aggregate throughput is still only ~2.5 msg/s at this point. The backlog may therefore continue growing during the rollout. The next step restores the 25 ms delay; after that rollout completes, aggregate theoretical capacity rises to ~200 msg/s — though actual throughput will be lower due to JMS and scheduling overhead. With the generator still producing 5 msg/s, the backlog can drain at up to roughly 195 msg/s under idealized conditions, so even a large accumulated backlog clears quickly:
 
 ```bash {"stage":"scenario_scale", "label":"reset shipping delay", "runtime":"bash"}
 kubectl set env deployment/shipping-service-app \
@@ -1618,7 +1640,7 @@ ORDERS.PROCESSED queue depth
         +-------------------> time
 ```
 
-The `Consumer Count per Queue` panel shows `ORDERS.PROCESSED` consumer count jump from 1 to 5, and the `Total Messages Across Pipeline Queues` stat drop back toward zero.
+The `Consumer Count per Queue` panel shows `ORDERS.PROCESSED` consumer count jump from 1 to 5, and the `Active Pipeline Backlog` stat drop back toward zero.
 
 **The operational story:**
 
@@ -1631,33 +1653,13 @@ That is the complete demonstration of why BrokerService and real-time monitoring
 ## Cleanup
 
 ```bash
-# Stop port-forwarding
-pkill -f "port-forward" 2>/dev/null || true
+# Remove the /etc/hosts entry added during setup
+sudo sed -i '/grafana.brokerservice-monitoring.local/d' /etc/hosts
 
-# Delete Camel deployments
-kubectl delete deployment order-generator order-processor-app shipping-service-app delivery-service-app -n service-app-project
-
-# Delete Camel sink deployment (if it was scaled up)
-kubectl delete deployment camel-jms-master-sink -n service-app-project 2>/dev/null || true
-
-# Delete BrokerApps
-kubectl delete BrokerApp order-generator order-processor-app shipping-service-app delivery-service-app master-sink-app -n service-app-project
-
-# Delete PEM config secrets
-kubectl delete secret cert-pemcfg cert-pemcfg-generator cert-pemcfg-order-processor cert-pemcfg-shipping-service cert-pemcfg-delivery-service cert-pemcfg-sink -n service-app-project
-
-# Delete the BrokerService
-kubectl delete BrokerService messaging-service -n service-app-project
-
-# Delete monitoring resources
-kubectl delete servicemonitor messaging-service-monitor -n service-app-project
-kubectl delete service messaging-service-metrics -n service-app-project
-kubectl delete prometheusrule artemis-aggregation-rules -n service-app-project
-
-# Delete the namespace (removes everything remaining)
+# Delete the tutorial namespace and everything deployed into it
 kubectl delete namespace service-app-project
 
-# Delete the minikube cluster
+# Delete the minikube cluster (also removes the Ingress controller)
 minikube delete --profile brokerservice-monitoring
 ```
 
@@ -1665,96 +1667,41 @@ minikube delete --profile brokerservice-monitoring
 
 ## Troubleshooting
 
-### Metrics Not Appearing in Grafana
+### Metrics not appearing in Grafana
 
-**1. Verify the broker pod is running:**
-```bash
-kubectl get pods -n service-app-project | grep messaging-service
-```
+> **Troubleshooting only:** The steps below use `kubectl port-forward` to inspect Prometheus directly. This is a debugging tool, not the normal way to access anything in this tutorial.
 
-**2. Check the broker metrics endpoint (manual, optional):**
+Temporarily port-forward Prometheus and check that the broker target is `UP`:
 
-The metrics endpoint on port 8888 uses **HTTPS/mTLS** — the same certificate chain
-that Prometheus uses. A plain `curl localhost:8888/metrics` from inside the broker
-container does **not** supply a client certificate and will therefore fail at the
-TLS handshake. This command does **not** replicate the Prometheus scrape.
-
-To verify that Prometheus can actually reach the broker, use the Prometheus Targets
-page instead (see step 4 below). If you do need to make a manual mTLS request,
-you must supply the Prometheus client certificate and the CA:
-
-```bash
-# From a pod that has the prometheus-cert secret mounted — for advanced debugging only.
-# Normal tutorial flow does not require this.
-curl --cacert /path/to/ca.pem \
-     --cert /path/to/tls.crt \
-     --key  /path/to/tls.key \
-     https://messaging-service-ss-0.messaging-service-hdls-svc.service-app-project.svc.cluster.local:8888/metrics \
-     | head -5
-```
-
-**3. Verify the ServiceMonitor has the correct label:**
-```bash
-kubectl get servicemonitor messaging-service-monitor -n service-app-project -o yaml | grep "release: prometheus"
-```
-
-**4. Check Prometheus targets (most useful first step):**
 ```bash
 kubectl port-forward svc/prometheus-kube-prometheus-prometheus \
   -n service-app-project 9090:9090 > /tmp/prometheus-pf.log 2>&1 &
 ```
-Open http://localhost:9090/targets and verify `messaging-service-monitor` is `UP`.
 
-If the target shows an error, the error message itself tells you whether the problem
-is TLS, authentication, DNS, or network — far more useful than a manual curl.
+Open http://localhost:9090/targets and find `messaging-service-monitor`. The error shown on a failing target will identify whether the problem is TLS, DNS, or authentication.
 
-**5. Verify the actual metric and job labels:**
+Also verify the `prometheus-cert` secret exists — the Operator requires it to authorise Prometheus:
 
-The dashboard and recording rules assume `job="messaging-service-metrics"`. This label
-comes from the `Service` name (`messaging-service-metrics`) via the ServiceMonitor.
-If you renamed the Service, the job label will differ.
-
-In Prometheus, search for `broker_queue_message_count` and inspect the returned labels.
-The `job`, `instance`, and `queue` labels must match what the recording rules and
-dashboard queries use. If `job` is different, update the recording rules and the
-`job=` selectors in the Grafana dashboard queries accordingly.
-
-**6. Verify the Grafana datasource UID:**
-
-The dashboard JSON hard-codes `"uid": "prometheus"`. With `kube-prometheus-stack`
-this is the default UID for the auto-provisioned Prometheus datasource, but it can
-differ if the Helm chart was customised.
-
-To verify:
-```bash
-# Port-forward Grafana if not already open
-kubectl port-forward svc/prometheus-grafana -n service-app-project 3000:80 &
-```
-In Grafana, go to **Connections → Data Sources → Prometheus** and check the UID shown
-in the URL (e.g. `/datasources/edit/prometheus`). If it differs from `prometheus`,
-update the `"uid"` field in the dashboard JSON and re-import.
-
-**7. Check Prometheus cert was found by the Operator:**
 ```bash
 kubectl get secret prometheus-cert -n service-app-project
+kubectl get servicemonitor messaging-service-monitor -n service-app-project -o yaml | grep "release: prometheus"
 ```
-The Operator adds Prometheus to the broker JAAS allowlist only when a secret named
-exactly `prometheus-cert` exists in the namespace.
 
-### Pipeline Not Flowing
+### Panel shows "No data" but the target is UP
 
-**Check that all four deployments are running:**
+Search for `broker_queue` in the Prometheus UI to see what metric names your Operator version exposes. If they differ from what the recording rules expect, update the `expr` fields in the PrometheusRule and the dashboard JSON to match.
+
+### Pipeline not flowing
+
+Check deployments and binding secrets:
+
 ```bash
 kubectl get deployment -n service-app-project
+kubectl get secret -n service-app-project | grep binding-secret
 ```
 
-**Check for connection errors in any Camel pod:**
+Check logs for connection errors:
+
 ```bash
 kubectl logs -n service-app-project deployment/order-processor-app --tail=30 | grep -i error
 ```
-
-**Verify binding secrets were created:**
-```bash
-kubectl get secret -n service-app-project | grep binding-secret
-```
-You should see `order-generator-binding-secret`, `order-processor-app-binding-secret`, `shipping-service-app-binding-secret`, and `delivery-service-app-binding-secret`.
