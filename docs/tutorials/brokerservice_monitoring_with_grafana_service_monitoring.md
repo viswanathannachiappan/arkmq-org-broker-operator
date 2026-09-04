@@ -66,7 +66,7 @@ The Kubernetes Deployment name and BrokerApp identity are the same — the busin
 - A running Kubernetes cluster (this tutorial uses `minikube`)
 - `kubectl` configured to interact with your cluster
 - `helm` installed for deploying monitoring components
-- The Camel pipeline image `quay.io/rh-ee-vnachiap/camel-jms-app:pipeline-1.0` must be pullable from your cluster.
+- The Camel pipeline image `quay.io/rh-ee-vnachiap/camel-jms-app:pipeline-2.0` must be pullable from your cluster.
 
 > **Naming note:** Throughout this tutorial the optional terminal consumer is called `master-sink` as a conceptual role. The corresponding Kubernetes resources use more specific names: the BrokerApp is `master-sink-app`, and the Camel Deployment is `camel-jms-master-sink`.
 
@@ -294,11 +294,9 @@ metadata:
   name: messaging-service
   namespace: service-app-project
   labels:
-    forWorkQueue: "true"
+    app: "order-processing-pipeline"
 spec:
   resources:
-    requests:
-      memory: "1Gi"
     limits:
       memory: "1Gi"
   env:
@@ -306,8 +304,8 @@ spec:
       value: "-Dlog4j2.level=INFO"
 EOF
 ```
+> The broker is configured with 1 GiB memory limit for this tutorial workload.
 
-> The broker is configured with 1 GiB of memory for this tutorial workload. The memory request and limit are intentionally set to the same value.
 
 ```bash {"stage":"deploy_service", "label":"wait for brokerservice", "runtime":"bash"}
 kubectl wait BrokerService messaging-service -n service-app-project --for=condition=Ready --timeout=300s
@@ -358,7 +356,7 @@ metadata:
 spec:
   selector:
     matchLabels:
-      forWorkQueue: "true"
+      app: "order-processing-pipeline"
   sharedAddresses:
     - address: "ORDERS.NEW"
   capabilities:
@@ -403,7 +401,7 @@ metadata:
 spec:
   selector:
     matchLabels:
-      forWorkQueue: "true"
+      app: "order-processing-pipeline"
   sharedAddresses:
     - address: "ORDERS.PROCESSED"
   capabilities:
@@ -452,7 +450,7 @@ metadata:
 spec:
   selector:
     matchLabels:
-      forWorkQueue: "true"
+      app: "order-processing-pipeline"
   sharedAddresses:
     - address: "ORDERS.SHIPPED"
   capabilities:
@@ -501,7 +499,7 @@ metadata:
 spec:
   selector:
     matchLabels:
-      forWorkQueue: "true"
+      app: "order-processing-pipeline"
   sharedAddresses:
     - address: "ORDERS.DELIVERED"
   capabilities:
@@ -516,163 +514,6 @@ EOF
 
 ```bash {"stage":"deploy_app", "label":"wait for delivery-service-app brokerapp", "runtime":"bash"}
 kubectl wait BrokerApp delivery-service-app -n service-app-project --for=condition=Ready --timeout=300s
-```
-
-#### master-sink (Optional operational drain)
-
-`master-sink` is not part of the business processing pipeline. It is an optional operational drain that you enable when you want to consume messages accumulating on the terminal `ORDERS.DELIVERED` queue — for example, to prevent unbounded growth during a long-running demo, or as an explicit "pipeline complete" acknowledgement.
-
-During the normal pipeline demonstration and the bottleneck/scale scenarios, keep this deployment at **0 replicas** so that `ORDERS.DELIVERED` depth remains visible in Grafana.
-
-```bash {"stage":"deploy_app", "label":"create master-sink cert", "runtime":"bash"}
-kubectl apply -f - <<EOF
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: master-sink-app-cert
-  namespace: service-app-project
-spec:
-  secretName: master-sink-app-cert
-  commonName: master-sink-app
-  issuerRef:
-    name: broker-ca-issuer
-    kind: ClusterIssuer
-EOF
-```
-
-```bash {"stage":"deploy_app", "label":"wait for master-sink cert", "runtime":"bash"}
-kubectl wait certificate master-sink-app-cert -n service-app-project --for=condition=Ready --timeout=300s
-```
-
-```bash {"stage":"deploy_app", "label":"deploy master-sink brokerapp", "runtime":"bash"}
-kubectl apply -f - <<EOF
-apiVersion: broker.arkmq.org/v1beta2
-kind: BrokerApp
-metadata:
-  name: master-sink-app
-  namespace: service-app-project
-spec:
-  selector:
-    matchLabels:
-      forWorkQueue: "true"
-  capabilities:
-    - consumerOf:
-        - address: "ORDERS.DELIVERED"
-          appName: "delivery-service-app"
-          appNamespace: "service-app-project"
-EOF
-```
-
-```bash {"stage":"deploy_app", "label":"wait for master-sink brokerapp", "runtime":"bash"}
-kubectl wait BrokerApp master-sink-app -n service-app-project --for=condition=Ready --timeout=300s
-```
-
-The Camel Deployment for master-sink is deployed at **0 replicas**. Scale it up only when you want to actively drain `ORDERS.DELIVERED`.
-
-```bash {"stage":"deploy_app", "label":"create master-sink pemcfg", "runtime":"bash"}
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: cert-pemcfg-sink
-  namespace: service-app-project
-type: Opaque
-stringData:
-  tls.pemcfg: |
-    source.key=/app/tls/client/tls.key
-    source.cert=/app/tls/client/tls.crt
-  java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
-EOF
-```
-
-```bash {"stage":"deploy_app", "label":"wait for master-sink binding secret", "runtime":"bash"}
-kubectl wait secret master-sink-app-binding-secret -n service-app-project --for=create --timeout=300s
-```
-
-```bash {"stage":"deploy_app", "label":"deploy master-sink camel app", "runtime":"bash"}
-kubectl apply -f - <<EOF
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: camel-jms-master-sink
-  namespace: service-app-project
-spec:
-  replicas: 0
-  selector:
-    matchLabels:
-      app: camel-jms-master-sink
-  template:
-    metadata:
-      labels:
-        app: camel-jms-master-sink
-    spec:
-      containers:
-      - name: camel-jms-app
-        image: quay.io/rh-ee-vnachiap/camel-jms-app:pipeline-1.0
-        imagePullPolicy: Always
-        resources:
-          limits:
-            memory: "512Mi"
-            cpu: "500m"
-          requests:
-            memory: "256Mi"
-            cpu: "100m"
-        env:
-        - name: BROKER_HOST
-          valueFrom:
-            secretKeyRef:
-              name: master-sink-app-binding-secret
-              key: host
-        - name: BROKER_PORT
-          valueFrom:
-            secretKeyRef:
-              name: master-sink-app-binding-secret
-              key: port
-        - name: CLIENT_USERNAME
-          value: "master-sink-app"
-        - name: APP_ROLE
-          value: "sink"
-        - name: CONSUMER_QUEUE
-          value: "ORDERS.DELIVERED"
-        - name: PRODUCER_QUEUE
-          value: "NONE"
-        - name: CONSUMER_CONCURRENCY
-          value: "5"
-        - name: JDK_JAVA_OPTIONS
-          value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-3.0.0.jar:/deployments/lib/main/com.hierynomus.asn-one-0.6.0.jar:/deployments/lib/main/org.slf4j.slf4j-api-2.0.18.jar -Djava.security.properties=/app/tls/pem/java.security"
-        volumeMounts:
-        - name: trust
-          mountPath: /app/tls/ca
-          readOnly: true
-        - name: cert
-          mountPath: /app/tls/client
-          readOnly: true
-        - name: pem
-          mountPath: /app/tls/pem
-          readOnly: true
-      volumes:
-      - name: trust
-        secret:
-          secretName: arkmq-org-broker-manager-ca
-      - name: cert
-        secret:
-          secretName: master-sink-app-cert
-      - name: pem
-        secret:
-          secretName: cert-pemcfg-sink
-EOF
-```
-
-To drain `ORDERS.DELIVERED` at any point during the tutorial, scale it up:
-
-```bash
-kubectl scale deployment camel-jms-master-sink --replicas=1 -n service-app-project
-```
-
-To stop draining and let the queue accumulate again:
-
-```bash
-kubectl scale deployment camel-jms-master-sink --replicas=0 -n service-app-project
 ```
 
 ### Wait for All Apps Provisioned
@@ -703,9 +544,35 @@ You should see `order-generator-binding-secret`, `order-processor-app-binding-se
 
 ## 5. Deploy Camel Applications
 
-The same Docker image is deployed four times. Role and queue configuration are injected via environment variables — no rebuilding required.
+The same Docker image (`camel-jms-app`) is deployed four times — once for each pipeline stage. The role and queue configuration are provided through environment variables, so the image does not need to be rebuilt for each application.
 
-### Shared PEM Secret
+The main configuration variables are:
+
+| Variable | Purpose |
+|---|---|
+| `APP_ROLE` | Selects which Camel route the application runs |
+| `CONSUMER_QUEUE` | Queue the application consumes from |
+| `PRODUCER_QUEUE` | Queue the application produces to |
+| `MESSAGE_RATE` | Messages per second for the generator |
+| `PROCESSING_DELAY_MS` | Simulated processing delay per message |
+| `ERROR_RATE` | Probability that processing a message fails |
+| `CONSUMER_CONCURRENCY` | Number of concurrent JMS consumers per pod |
+
+Each Camel deployment needs two things for mTLS:
+
+- Its own **app certificate** (for example, `order-generator-app-cert`). cert-manager creates this certificate, and the Deployment mounts it at `/app/tls/client/`.
+- A **PEM keystore configuration** that tells the [dentrassi PEM keystore](https://github.com/ctron/pem-keystore) library where to find the certificate and private key.
+
+The PEM configuration is identical for all four applications because they all use the same filesystem paths:
+
+- `/app/tls/client/tls.key`
+- `/app/tls/client/tls.crt`
+
+However, each Deployment mounts a different certificate Secret at that path. This means the applications share the same PEM configuration while retaining separate mTLS identities.
+
+### PEM keystore configuration template
+
+Create the PEM configuration once as a template. The same content is used for each application's `cert-pemcfg-*` Secret:
 
 ```bash {"stage":"deploy_camel", "label":"create pemcfg secret", "runtime":"bash"}
 kubectl apply -f - <<EOF
@@ -723,19 +590,21 @@ stringData:
 EOF
 ```
 
-Each deployment mounts its own app certificate at `/app/tls/client`. All four deployments share the same `cert-pemcfg` content (the PEM keystore type configuration), but mount different cert secrets for their individual mTLS identity.
+> **Note:** The `cert-pemcfg-*` Secrets used by the individual Deployments contain this same configuration. The certificate itself is not stored in these Secrets — each application's certificate comes from its own cert-manager-generated Secret.
 
 ### order-generator
 
-Produces 5 order messages per second into `ORDERS.NEW`. The rate is controlled by the `MESSAGE_RATE` environment variable in the Camel Deployment — the BrokerApp only declares the messaging capability (`producerOf: ORDERS.NEW`). To change the rate without rebuilding the image:
+`order-generator` produces 5 order messages per second into `ORDERS.NEW`. The rate is controlled by the `MESSAGE_RATE` environment variable in the Camel Deployment. The BrokerApp only declares the messaging capability (`producerOf: ORDERS.NEW`).
 
-Wait for the `order-generator` binding secret before deploying:
+To change the message rate, update the Deployment's `MESSAGE_RATE` value — no image rebuild is required.
+
+Before deploying the application, wait for the binding Secret created for its BrokerApp:
 
 ```bash {"stage":"deploy_camel", "label":"wait for order-generator binding secret", "runtime":"bash"}
 kubectl wait secret order-generator-binding-secret -n service-app-project --for=create --timeout=300s
 ```
 
-Create the PEM keystore secret for the generator's own certificate:
+Create the PEM keystore configuration Secret for this application:
 
 ```bash {"stage":"deploy_camel", "label":"create order-generator pemcfg", "runtime":"bash"}
 kubectl apply -f - <<EOF
@@ -772,7 +641,7 @@ spec:
     spec:
       containers:
       - name: camel-jms-app
-        image: quay.io/rh-ee-vnachiap/camel-jms-app:pipeline-1.0
+        image: quay.io/rh-ee-vnachiap/camel-jms-app:pipeline-2.0
         imagePullPolicy: Always
         resources:
           limits:
@@ -800,8 +669,6 @@ spec:
           value: "ORDERS.NEW"
         - name: MESSAGE_RATE
           value: "5"
-        - name: JDK_JAVA_OPTIONS
-          value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-3.0.0.jar:/deployments/lib/main/com.hierynomus.asn-one-0.6.0.jar:/deployments/lib/main/org.slf4j.slf4j-api-2.0.18.jar -Djava.security.properties=/app/tls/pem/java.security"
         volumeMounts:
         - name: trust
           mountPath: /app/tls/ca
@@ -870,7 +737,7 @@ spec:
     spec:
       containers:
       - name: camel-jms-app
-        image: quay.io/rh-ee-vnachiap/camel-jms-app:pipeline-1.0
+        image: quay.io/rh-ee-vnachiap/camel-jms-app:pipeline-2.0
         imagePullPolicy: Always
         resources:
           limits:
@@ -903,8 +770,6 @@ spec:
         - name: CONSUMER_CONCURRENCY
           value: "1"
         # Throughput: 1 consumer / 0.1 s = ~10 msg/s — 2x headroom above the 5 msg/s generator rate.
-        - name: JDK_JAVA_OPTIONS
-          value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-3.0.0.jar:/deployments/lib/main/com.hierynomus.asn-one-0.6.0.jar:/deployments/lib/main/org.slf4j.slf4j-api-2.0.18.jar -Djava.security.properties=/app/tls/pem/java.security"
         volumeMounts:
         - name: trust
           mountPath: /app/tls/ca
@@ -973,7 +838,7 @@ spec:
     spec:
       containers:
       - name: camel-jms-app
-        image: quay.io/rh-ee-vnachiap/camel-jms-app:pipeline-1.0
+        image: quay.io/rh-ee-vnachiap/camel-jms-app:pipeline-2.0
         imagePullPolicy: Always
         resources:
           limits:
@@ -1006,8 +871,6 @@ spec:
         - name: CONSUMER_CONCURRENCY
           value: "1"
         # Throughput: 1 consumer / 0.025 s = ~40 msg/s — 8x headroom above the 5 msg/s generator rate.
-        - name: JDK_JAVA_OPTIONS
-          value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-3.0.0.jar:/deployments/lib/main/com.hierynomus.asn-one-0.6.0.jar:/deployments/lib/main/org.slf4j.slf4j-api-2.0.18.jar -Djava.security.properties=/app/tls/pem/java.security"
         volumeMounts:
         - name: trust
           mountPath: /app/tls/ca
@@ -1076,7 +939,7 @@ spec:
     spec:
       containers:
       - name: camel-jms-app
-        image: quay.io/rh-ee-vnachiap/camel-jms-app:pipeline-1.0
+        image: quay.io/rh-ee-vnachiap/camel-jms-app:pipeline-2.0
         imagePullPolicy: Always
         resources:
           limits:
@@ -1109,8 +972,6 @@ spec:
         - name: CONSUMER_CONCURRENCY
           value: "1"
         # Throughput: 1 consumer / 0.025 s = ~40 msg/s — 8x headroom above the 5 msg/s generator rate.
-        - name: JDK_JAVA_OPTIONS
-          value: "-Xbootclasspath/a:/deployments/lib/main/de.dentrassi.crypto.pem-keystore-3.0.0.jar:/deployments/lib/main/com.hierynomus.asn-one-0.6.0.jar:/deployments/lib/main/org.slf4j.slf4j-api-2.0.18.jar -Djava.security.properties=/app/tls/pem/java.security"
         volumeMounts:
         - name: trust
           mountPath: /app/tls/ca
@@ -1136,6 +997,170 @@ EOF
 
 ```bash {"stage":"deploy_camel", "label":"wait for delivery-service-app", "runtime":"bash"}
 kubectl wait deployment delivery-service-app -n service-app-project --for=condition=Available --timeout=300s
+```
+
+### master-sink (Optional operational drain)
+
+`master-sink` is not part of the business processing pipeline. It is an optional operational drain that you enable when you want to consume messages accumulating on the terminal `ORDERS.DELIVERED` queue — for example, to prevent unbounded growth during a long-running demo, or as an explicit "pipeline complete" acknowledgement.
+
+During the normal pipeline demonstration and the bottleneck/scale scenarios, keep this deployment at **0 replicas** so that `ORDERS.DELIVERED` depth remains visible in Grafana.
+
+```bash {"stage":"deploy_camel", "label":"create master-sink cert", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: master-sink-app-cert
+  namespace: service-app-project
+spec:
+  secretName: master-sink-app-cert
+  commonName: master-sink-app
+  issuerRef:
+    name: broker-ca-issuer
+    kind: ClusterIssuer
+EOF
+```
+
+```bash {"stage":"deploy_camel", "label":"wait for master-sink cert", "runtime":"bash"}
+kubectl wait certificate master-sink-app-cert -n service-app-project --for=condition=Ready --timeout=300s
+```
+
+```bash {"stage":"deploy_camel", "label":"deploy master-sink brokerapp", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: broker.arkmq.org/v1beta2
+kind: BrokerApp
+metadata:
+  name: master-sink-app
+  namespace: service-app-project
+spec:
+  selector:
+    matchLabels:
+      app: "order-processing-pipeline"
+  capabilities:
+    - consumerOf:
+        - address: "ORDERS.DELIVERED"
+          appName: "delivery-service-app"
+          appNamespace: "service-app-project"
+EOF
+```
+
+```bash {"stage":"deploy_camel", "label":"wait for master-sink brokerapp", "runtime":"bash"}
+kubectl wait BrokerApp master-sink-app -n service-app-project --for=condition=Ready --timeout=300s
+```
+
+The Camel JMS app uses the [dentrassi PEM keystore](https://github.com/ctron/pem-keystore) library to handle mTLS. The `master-sink-app-cert` Secret contains the TLS certificate and private key, which are mounted in the container at `/app/tls/client/`.
+
+The `cert-pemcfg-sink` Secret provides the configuration needed to use those files:
+
+- **`tls.pemcfg`** — tells the PEM library where to find the certificate and private key: `/app/tls/client/tls.crt` and `/app/tls/client/tls.key`.
+- **`java.security`** — registers the PEM keystore provider with the JVM.
+
+The paths in `tls.pemcfg` must match the certificate's `mountPath` in the Deployment.
+
+```bash {"stage":"deploy_camel", "label":"create master-sink pemcfg", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cert-pemcfg-sink
+  namespace: service-app-project
+type: Opaque
+stringData:
+  tls.pemcfg: |
+    source.key=/app/tls/client/tls.key
+    source.cert=/app/tls/client/tls.crt
+  java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
+EOF
+```
+
+```bash {"stage":"deploy_camel", "label":"wait for master-sink binding secret", "runtime":"bash"}
+kubectl wait secret master-sink-app-binding-secret -n service-app-project --for=create --timeout=300s
+```
+
+```bash {"stage":"deploy_camel", "label":"deploy master-sink camel app", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: camel-jms-master-sink
+  namespace: service-app-project
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: camel-jms-master-sink
+  template:
+    metadata:
+      labels:
+        app: camel-jms-master-sink
+    spec:
+      containers:
+      - name: camel-jms-app
+        image: quay.io/rh-ee-vnachiap/camel-jms-app:pipeline-2.0
+        imagePullPolicy: Always
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+        env:
+        - name: BROKER_HOST
+          valueFrom:
+            secretKeyRef:
+              name: master-sink-app-binding-secret
+              key: host
+        - name: BROKER_PORT
+          valueFrom:
+            secretKeyRef:
+              name: master-sink-app-binding-secret
+              key: port
+        - name: CLIENT_USERNAME
+          value: "master-sink-app"
+        - name: APP_ROLE
+          value: "sink"
+        - name: CONSUMER_QUEUE
+          value: "ORDERS.DELIVERED"
+        - name: PRODUCER_QUEUE
+          value: "NONE"
+        - name: CONSUMER_CONCURRENCY
+          value: "5"
+        volumeMounts:
+        - name: trust
+          mountPath: /app/tls/ca
+          readOnly: true
+        - name: cert
+          mountPath: /app/tls/client
+          readOnly: true
+        - name: pem
+          mountPath: /app/tls/pem
+          readOnly: true
+      volumes:
+      - name: trust
+        secret:
+          secretName: arkmq-org-broker-manager-ca
+      - name: cert
+        secret:
+          secretName: master-sink-app-cert
+      - name: pem
+        secret:
+          secretName: cert-pemcfg-sink
+EOF
+```
+
+The Camel Deployment for master-sink is deployed at **0 replicas**. Scale it up only when you want to actively drain `ORDERS.DELIVERED`.
+
+To drain `ORDERS.DELIVERED` at any point during the tutorial, scale it up:
+
+```bash
+kubectl scale deployment camel-jms-master-sink --replicas=1 -n service-app-project
+```
+
+To stop draining and let the queue accumulate again:
+
+```bash
+kubectl scale deployment camel-jms-master-sink --replicas=0 -n service-app-project
 ```
 
 ### Verify the Pipeline
@@ -1298,6 +1323,17 @@ EOF
 
 The dashboard is provisioned as a Kubernetes `ConfigMap` with the `grafana_dashboard: "1"` label. The Grafana sidecar — already configured in Section 2 — watches for ConfigMaps with that label and automatically loads them. No Helm upgrade or Grafana restart is required.
 
+The dashboard is organized into 6 rows:
+
+| Row | Purpose |
+|---|---|
+| **Memory Overview** | Container memory %, JVM heap %, total queue persistent data, container headroom |
+| **Memory Components Over Time** | Container working set, JVM heap used, queue persistent data, container limit on one graph |
+| **Queue Memory Contribution** | Stacked persistent queue data by queue |
+| **Current Queue Breakdown** | Table: persistent data and message count per queue |
+| **Queue Message Activity** | Stacked message count by queue over time |
+| **JVM Diagnostics** | Young/Old GC collection rate |
+
 ```bash {"stage":"grafana", "label":"create dashboard configmap", "runtime":"bash"}
 kubectl apply -f - <<'EOF'
 apiVersion: v1
@@ -1310,185 +1346,747 @@ metadata:
 data:
   artemis-broker-health.json: |
     {
-      "title": "Artemis Broker Operational Health & Performance",
-      "uid": "artemis-broker-health",
+      "title": "Artemis Broker - Memory & Queue Analysis",
+      "uid": "artemis-broker-memory-queue-analysis",
       "style": "dark",
-      "tags": ["artemis", "messaging", "observability"],
+      "tags": [
+        "artemis",
+        "amq-broker",
+        "jvm",
+        "memory",
+        "queue"
+      ],
       "timezone": "",
       "editable": true,
       "graphTooltip": 1,
-      "time": { "from": "now-15m", "to": "now" },
+      "time": {
+        "from": "now-30m",
+        "to": "now"
+      },
       "timepicker": {},
       "refresh": "5s",
       "schemaVersion": 38,
-      "version": 2,
+      "version": 27,
       "panels": [
+
         {
-          "id": 100, "title": "Row 1: Broker Overview", "type": "row",
-          "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+          "id": 100,
+          "title": "Memory Overview",
+          "type": "row",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          }
         },
+
         {
-          "id": 1, "title": "Broker Pod Ready", "type": "stat",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
-          "targets": [{ "expr": "sum(kube_pod_status_ready{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",condition=\"true\"})", "refId": "A" }],
+          "id": 2,
+          "title": "Container Memory %",
+          "description": "Current messaging-service container working-set memory as a percentage of its configured Kubernetes memory limit.",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 0,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "100 * sum(container_memory_working_set_bytes{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",container!=\"POD\",container!=\"\"}) / clamp_min(sum(kube_pod_container_resource_limits{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",resource=\"memory\",unit=\"byte\"}),1)",
+              "refId": "A"
+            }
+          ],
           "fieldConfig": {
             "defaults": {
-              "unit": "short", "min": 0, "max": 1,
-              "color": { "mode": "thresholds" },
-              "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] },
-              "mappings": [{ "type": "value", "options": { "0": { "text": "NOT READY", "color": "red" }, "1": { "text": "HEALTHY", "color": "green" } } }]
+              "unit": "percent",
+              "min": 0,
+              "max": 100,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 70
+                  },
+                  {
+                    "color": "red",
+                    "value": 85
+                  }
+                ]
+              }
             }
           },
-          "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "orientation": "auto", "textMode": "auto", "colorMode": "background" }
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "background"
+          }
         },
+
         {
-          "id": 2, "title": "Broker Ready Replicas", "type": "stat",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "gridPos": { "h": 6, "w": 6, "x": 6, "y": 1 },
-          "targets": [{ "expr": "kube_statefulset_status_replicas_ready{namespace=\"service-app-project\",statefulset=\"messaging-service-ss\"}", "refId": "A" }],
+          "id": 3,
+          "title": "JVM Heap %",
+          "description": "Current JVM heap used as a percentage of the maximum configured JVM heap.",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 6,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "100 * sum(jvm_memory_used_bytes{job=\"messaging-service-metrics\",area=\"heap\"}) / clamp_min(sum(jvm_memory_max_bytes{job=\"messaging-service-metrics\",area=\"heap\"}),1)",
+              "refId": "A"
+            }
+          ],
           "fieldConfig": {
             "defaults": {
-              "unit": "short",
-              "color": { "mode": "thresholds" },
-              "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+              "unit": "percent",
+              "min": 0,
+              "max": 100,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 70
+                  },
+                  {
+                    "color": "red",
+                    "value": 85
+                  }
+                ]
+              }
             }
           },
-          "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "orientation": "auto", "textMode": "auto", "colorMode": "value" }
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "background"
+          }
         },
+
         {
-          "id": 3, "title": "Total Queue Messages", "type": "stat",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "gridPos": { "h": 6, "w": 6, "x": 12, "y": 1 },
-          "targets": [{ "expr": "sum(broker_queue_message_count{job=\"messaging-service-metrics\"})", "refId": "A" }],
+          "id": 4,
+          "title": "Queue Persistent Data",
+          "description": "Total persistent message data currently retained across all Artemis queues.",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 12,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "sum(broker_queue_persistent_size{job=\"messaging-service-metrics\"})",
+              "refId": "A"
+            }
+          ],
           "fieldConfig": {
             "defaults": {
-              "unit": "short",
-              "color": { "mode": "thresholds" },
-              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1000 }, { "color": "red", "value": 5000 }] }
+              "unit": "bytes",
+              "min": 0,
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "green"
+              }
             }
           },
-          "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "orientation": "auto", "textMode": "auto", "colorMode": "value" }
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value"
+          }
         },
+
         {
-          "id": 4, "title": "Backlog With No Consumers", "type": "stat",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "gridPos": { "h": 6, "w": 6, "x": 18, "y": 1 },
-          "targets": [{ "expr": "sum(broker_queue_message_count{job=\"messaging-service-metrics\"} and on(queue, instance) (broker_queue_consumer_count{job=\"messaging-service-metrics\"} == 0))", "refId": "A" }],
+          "id": 5,
+          "title": "Container Memory Headroom",
+          "description": "Remaining difference between the messaging-service container memory limit and current working-set memory.",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 18,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "sum(kube_pod_container_resource_limits{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",resource=\"memory\",unit=\"byte\"}) - sum(container_memory_working_set_bytes{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",container!=\"POD\",container!=\"\"})",
+              "refId": "A"
+            }
+          ],
           "fieldConfig": {
             "defaults": {
-              "unit": "short",
-              "color": { "mode": "thresholds" },
-              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 1000 }] }
+              "unit": "bytes",
+              "min": 0,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 104857600
+                  },
+                  {
+                    "color": "green",
+                    "value": 314572800
+                  }
+                ]
+              }
             }
           },
-          "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "orientation": "auto", "textMode": "auto", "colorMode": "background" }
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "background"
+          }
         },
+
         {
-          "id": 200, "title": "Row 2: Queue Overview", "type": "row",
-          "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 }
+          "id": 200,
+          "title": "Container, JVM & Queue Memory",
+          "type": "row",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 5
+          }
         },
+
         {
-          "id": 5, "title": "Queue Message Count", "type": "timeseries",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 8 },
-          "targets": [{ "expr": "sum by (queue) (broker_queue_message_count{job=\"messaging-service-metrics\"})", "legendFormat": "{{queue}}", "refId": "A" }],
-          "fieldConfig": { "defaults": { "unit": "short", "min": 0 } },
-          "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
-        },
-        {
-          "id": 6, "title": "Queue Backlog Growth", "type": "timeseries",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 8 },
-          "targets": [{ "expr": "sum by (queue) (deriv(broker_queue_message_count{job=\"messaging-service-metrics\"}[10m]))", "legendFormat": "{{queue}}", "refId": "A" }],
-          "fieldConfig": { "defaults": { "unit": "short" } },
-          "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
-        },
-        {
-          "id": 300, "title": "Row 3: Queue Processing", "type": "row",
-          "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 }
-        },
-        {
-          "id": 7, "title": "Queue Consumer Count", "type": "timeseries",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "gridPos": { "h": 7, "w": 8, "x": 0, "y": 16 },
-          "targets": [{ "expr": "sum by (queue) (broker_queue_consumer_count{job=\"messaging-service-metrics\"})", "legendFormat": "{{queue}}", "refId": "A" }],
-          "fieldConfig": { "defaults": { "unit": "short", "min": 0 } }
-        },
-        {
-          "id": 8, "title": "Messages Being Delivered", "type": "timeseries",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "gridPos": { "h": 7, "w": 8, "x": 8, "y": 16 },
-          "targets": [{ "expr": "sum by (queue) (broker_queue_delivering_count{job=\"messaging-service-metrics\"})", "legendFormat": "{{queue}}", "refId": "A" }],
-          "fieldConfig": { "defaults": { "unit": "short", "min": 0 } }
-        },
-        {
-          "id": 9, "title": "Queue Persistent Size", "type": "timeseries",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "gridPos": { "h": 7, "w": 8, "x": 16, "y": 16 },
-          "targets": [{ "expr": "sum by (queue) (broker_queue_persistent_size{job=\"messaging-service-metrics\"})", "legendFormat": "{{queue}}", "refId": "A" }],
-          "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } }
-        },
-        {
-          "id": 400, "title": "Row 4: Broker Resource Health", "type": "row",
-          "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 }
-        },
-        {
-          "id": 10, "title": "Total Consumer Count", "type": "stat",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "gridPos": { "h": 6, "w": 6, "x": 0, "y": 24 },
-          "targets": [{ "expr": "artemis:total_consumer_count", "refId": "A" }],
-          "fieldConfig": { "defaults": { "unit": "short", "min": 0 } },
-          "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "orientation": "auto", "textMode": "auto", "colorMode": "value" }
-        },
-        {
-          "id": 11, "title": "Container CPU Usage", "type": "timeseries",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "gridPos": { "h": 7, "w": 6, "x": 6, "y": 24 },
-          "targets": [{ "expr": "sum(rate(container_cpu_usage_seconds_total{pod=~\"messaging-service-ss-.*\",container!=\"POD\",container!=\"\"}[5m]))", "legendFormat": "CPU Cores", "refId": "A" }],
-          "fieldConfig": { "defaults": { "unit": "cores", "min": 0 } }
-        },
-        {
-          "id": 12, "title": "Container Memory Working Set %", "type": "timeseries",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "gridPos": { "h": 7, "w": 6, "x": 12, "y": 24 },
-          "targets": [{ "expr": "100 * sum(container_memory_working_set_bytes{pod=~\"messaging-service-ss-.*\",container!=\"POD\",container!=\"\"}) / sum(kube_pod_container_resource_limits{pod=~\"messaging-service-ss-.*\",resource=\"memory\",unit=\"byte\"})", "legendFormat": "Memory % of Limit", "refId": "A" }],
+          "id": 10,
+          "title": "Container vs JVM vs Queue Memory",
+          "description": "Memory comparison for the messaging-service Artemis broker.",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 12,
+            "w": 24,
+            "x": 0,
+            "y": 6
+          },
+          "targets": [
+            {
+              "expr": "sum(container_memory_working_set_bytes{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",container!=\"POD\",container!=\"\"})",
+              "legendFormat": "Container Working Set",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(jvm_memory_used_bytes{job=\"messaging-service-metrics\",area=\"heap\"})",
+              "legendFormat": "JVM Heap Used",
+              "refId": "B"
+            },
+            {
+              "expr": "sum(broker_queue_persistent_size{job=\"messaging-service-metrics\"})",
+              "legendFormat": "Queue Persistent Data",
+              "refId": "C"
+            },
+            {
+              "expr": "sum(kube_pod_container_resource_limits{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",resource=\"memory\",unit=\"byte\"})",
+              "legendFormat": "Container Memory Limit",
+              "refId": "D"
+            },
+            {
+              "expr": "sum(jvm_memory_max_bytes{job=\"messaging-service-metrics\",area=\"heap\"})",
+              "legendFormat": "JVM Heap Max",
+              "refId": "E"
+            }
+          ],
           "fieldConfig": {
             "defaults": {
-              "unit": "percent", "min": 0, "max": 100,
-              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 70 }, { "color": "red", "value": 85 }] }
+              "unit": "bytes",
+              "min": 0,
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "never",
+                "spanNulls": true,
+                "axisPlacement": "left",
+                "scaleDistribution": {
+                  "type": "linear"
+                }
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "A"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "Container Working Set"
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "purple"
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 3
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "B"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "JVM Heap Used"
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "orange"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "C"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "Queue Persistent Data"
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "green"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "D"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "Container Memory Limit"
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "blue"
+                    }
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        8,
+                        4
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "E"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "JVM Heap Max"
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        6,
+                        4
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
             }
           }
         },
+
         {
-          "id": 13, "title": "JVM Heap Utilization %", "type": "timeseries",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "gridPos": { "h": 7, "w": 6, "x": 18, "y": 24 },
-          "targets": [{ "expr": "100 * sum(jvm_memory_used_bytes{job=\"messaging-service-metrics\",area=\"heap\"}) / sum(jvm_memory_max_bytes{job=\"messaging-service-metrics\",area=\"heap\"})", "legendFormat": "Heap % Used", "refId": "A" }],
+          "id": 300,
+          "title": "Queue Storage Contribution",
+          "type": "row",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 18
+          }
+        },
+
+        {
+          "id": 31,
+          "title": "Queue Storage Contribution (Bar Chart)",
+          "description": "Persistent storage consumed by each individual Artemis queue.",
+          "type": "barchart",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 19
+          },
+          "targets": [
+            {
+              "expr": "sum by (queue)(broker_queue_persistent_size{job=\"messaging-service-metrics\"})",
+              "legendFormat": "{{queue}}",
+              "refId": "A",
+              "instant": true
+            }
+          ],
           "fieldConfig": {
             "defaults": {
-              "unit": "percent", "min": 0, "max": 100,
-              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 70 }, { "color": "red", "value": 85 }] }
+              "unit": "bytes",
+              "min": 0,
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "fillOpacity": 85,
+                "lineWidth": 1
+              }
+            }
+          },
+          "options": {
+            "orientation": "horizontal",
+            "showValue": "always",
+            "groupWidth": 0.7,
+            "barWidth": 0.7,
+            "legend": {
+              "displayMode": "list",
+              "placement": "right"
             }
           }
         },
+
         {
-          "id": 500, "title": "Row 5: JVM Details", "type": "row",
-          "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 }
+          "id": 32,
+          "title": "Current Queue Breakdown",
+          "description": "Current persistent bytes, message count, and percentage of total storage for every Artemis queue.",
+          "type": "table",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 27
+          },
+          "targets": [
+            {
+              "expr": "sum by (queue)(broker_queue_persistent_size{job=\"messaging-service-metrics\"})",
+              "format": "table",
+              "instant": true,
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (queue)(broker_queue_message_count{job=\"messaging-service-metrics\"})",
+              "format": "table",
+              "instant": true,
+              "refId": "B"
+            },
+            {
+              "expr": "100 * sum by (queue)(broker_queue_persistent_size{job=\"messaging-service-metrics\"}) / clamp_min(sum(broker_queue_persistent_size{job=\"messaging-service-metrics\"}), 1)",
+              "format": "table",
+              "instant": true,
+              "refId": "C"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "merge",
+              "options": {}
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "Time 1": true,
+                  "Time 2": true,
+                  "Time 3": true
+                },
+                "indexByName": {
+                  "queue": 0,
+                  "Value #A": 1,
+                  "Value #B": 2,
+                  "Value #C": 3
+                },
+                "renameByName": {
+                  "queue": "Queue",
+                  "Value #A": "Persistent Data",
+                  "Value #B": "Messages",
+                  "Value #C": "% of Total"
+                }
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "custom": {
+                "align": "auto"
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Queue"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 240
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Persistent Data"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "bytes"
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "gauge",
+                      "mode": "gradient"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Messages"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "short"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "% of Total"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "percent"
+                  },
+                  {
+                    "id": "min",
+                    "value": 0
+                  },
+                  {
+                    "id": "max",
+                    "value": 100
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "gauge",
+                      "mode": "gradient"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm",
+            "sortBy": [
+              {
+                "displayName": "Persistent Data",
+                "desc": true
+              }
+            ]
+          }
         },
+
         {
-          "id": 14, "title": "JVM Heap Used", "type": "timeseries",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 32 },
-          "targets": [{ "expr": "sum(jvm_memory_used_bytes{job=\"messaging-service-metrics\",area=\"heap\"})", "legendFormat": "Heap Used", "refId": "A" }],
-          "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } }
+          "id": 400,
+          "title": "JVM Diagnostics",
+          "type": "row",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 35
+          }
         },
+
         {
-          "id": 15, "title": "JVM Heap Max", "type": "timeseries",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 32 },
-          "targets": [{ "expr": "sum(jvm_memory_max_bytes{job=\"messaging-service-metrics\",area=\"heap\"})", "legendFormat": "Heap Max", "refId": "A" }],
-          "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } }
+          "id": 41,
+          "title": "JVM GC Activity",
+          "description": "JVM garbage collection execution rates.",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 36
+          },
+          "targets": [
+            {
+              "expr": "rate(jvm_gc_collection_seconds_count{job=\"messaging-service-metrics\",gc=~\".*Young.*\"}[5m])",
+              "legendFormat": "Young GC rate",
+              "refId": "A"
+            },
+            {
+              "expr": "rate(jvm_gc_collection_seconds_count{job=\"messaging-service-metrics\",gc=~\".*Old.*\"}[5m])",
+              "legendFormat": "Old GC rate",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "min": 0,
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 10,
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            }
+          }
         }
       ]
     }
