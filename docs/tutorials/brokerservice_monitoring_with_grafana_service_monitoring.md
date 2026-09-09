@@ -141,6 +141,834 @@ kubectl wait deployment --for=condition=Available -n service-app-project prometh
 kubectl wait statefulset --for=jsonpath='{.status.readyReplicas}'=1 -n service-app-project prometheus-prometheus-kube-prometheus-prometheus --timeout=300s
 ```
 
+
+### Set Up Grafana Dashboard
+
+Grafana is already running (it was installed with kube-prometheus-stack above). Apply the dashboard ConfigMap now so the sidecar loads it immediately. Metrics will show "No data" until Section 6 configures the ServiceMonitor — that is expected.
+
+```bash {"stage":"grafana", "label":"create dashboard configmap", "runtime":"bash"}
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: artemis-broker-health
+  namespace: service-app-project
+  labels:
+    grafana_dashboard: "1"
+data:
+  artemis-broker-health.json: |
+    {
+      "title": "Artemis Broker - Memory & Queue Analysis",
+      "uid": "artemis-broker-memory-queue-analysis",
+      "style": "dark",
+      "tags": [
+        "artemis",
+        "amq-broker",
+        "jvm",
+        "memory",
+        "queue"
+      ],
+      "timezone": "",
+      "editable": true,
+      "graphTooltip": 1,
+      "time": {
+        "from": "now-30m",
+        "to": "now"
+      },
+      "timepicker": {},
+      "refresh": "5s",
+      "schemaVersion": 38,
+      "version": 27,
+      "panels": [
+
+        {
+          "id": 100,
+          "title": "Memory Overview",
+          "type": "row",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          }
+        },
+
+        {
+          "id": 2,
+          "title": "Container Memory %",
+          "description": "Current messaging-service container working-set memory as a percentage of its configured Kubernetes memory limit.",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 0,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "100 * sum(container_memory_working_set_bytes{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",container!=\"POD\",container!=\"\"}) / clamp_min(sum(kube_pod_container_resource_limits{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",resource=\"memory\",unit=\"byte\"}),1)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "min": 0,
+              "max": 100,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 70
+                  },
+                  {
+                    "color": "red",
+                    "value": 85
+                  }
+                ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "background"
+          }
+        },
+
+        {
+          "id": 3,
+          "title": "JVM Heap %",
+          "description": "Current JVM heap used as a percentage of the maximum configured JVM heap.",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 6,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "100 * sum(jvm_memory_used_bytes{job=\"messaging-service-metrics\",area=\"heap\"}) / clamp_min(sum(jvm_memory_max_bytes{job=\"messaging-service-metrics\",area=\"heap\"}),1)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "min": 0,
+              "max": 100,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 70
+                  },
+                  {
+                    "color": "red",
+                    "value": 85
+                  }
+                ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "background"
+          }
+        },
+
+        {
+          "id": 4,
+          "title": "Queue Persistent Data",
+          "description": "Total persistent message data currently retained across all Artemis queues.",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 12,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "sum(broker_queue_persistent_size{job=\"messaging-service-metrics\"})",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "min": 0,
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "green"
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value"
+          }
+        },
+
+        {
+          "id": 5,
+          "title": "Container Memory Headroom",
+          "description": "Remaining difference between the messaging-service container memory limit and current working-set memory.",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 18,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "sum(kube_pod_container_resource_limits{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",resource=\"memory\",unit=\"byte\"}) - sum(container_memory_working_set_bytes{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",container!=\"POD\",container!=\"\"})",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "min": 0,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 104857600
+                  },
+                  {
+                    "color": "green",
+                    "value": 314572800
+                  }
+                ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "background"
+          }
+        },
+
+        {
+          "id": 200,
+          "title": "Container, JVM & Queue Memory",
+          "type": "row",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 5
+          }
+        },
+
+        {
+          "id": 10,
+          "title": "Container vs JVM vs Queue Memory",
+          "description": "Memory comparison for the messaging-service Artemis broker.",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 12,
+            "w": 24,
+            "x": 0,
+            "y": 6
+          },
+          "targets": [
+            {
+              "expr": "sum(container_memory_working_set_bytes{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",container!=\"POD\",container!=\"\"})",
+              "legendFormat": "Container Working Set",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(jvm_memory_used_bytes{job=\"messaging-service-metrics\",area=\"heap\"})",
+              "legendFormat": "JVM Heap Used",
+              "refId": "B"
+            },
+            {
+              "expr": "sum(broker_queue_persistent_size{job=\"messaging-service-metrics\"})",
+              "legendFormat": "Queue Persistent Data",
+              "refId": "C"
+            },
+            {
+              "expr": "sum(kube_pod_container_resource_limits{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",resource=\"memory\",unit=\"byte\"})",
+              "legendFormat": "Container Memory Limit",
+              "refId": "D"
+            },
+            {
+              "expr": "sum(jvm_memory_max_bytes{job=\"messaging-service-metrics\",area=\"heap\"})",
+              "legendFormat": "JVM Heap Max",
+              "refId": "E"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "min": 0,
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "never",
+                "spanNulls": true,
+                "axisPlacement": "left",
+                "scaleDistribution": {
+                  "type": "linear"
+                }
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "A"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "Container Working Set"
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "purple"
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 3
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "B"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "JVM Heap Used"
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "orange"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "C"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "Queue Persistent Data"
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "green"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "D"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "Container Memory Limit"
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "blue"
+                    }
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        8,
+                        4
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "E"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "JVM Heap Max"
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        6,
+                        4
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+
+        {
+          "id": 300,
+          "title": "Queue Storage Contribution",
+          "type": "row",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 18
+          }
+        },
+
+        {
+          "id": 31,
+          "title": "Queue Storage Contribution (Bar Chart)",
+          "description": "Persistent storage consumed by each individual Artemis queue.",
+          "type": "barchart",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 19
+          },
+          "targets": [
+            {
+              "expr": "sum by (queue)(broker_queue_persistent_size{job=\"messaging-service-metrics\"})",
+              "legendFormat": "{{queue}}",
+              "refId": "A",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "min": 0,
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "fillOpacity": 85,
+                "lineWidth": 1
+              }
+            }
+          },
+          "options": {
+            "orientation": "horizontal",
+            "showValue": "always",
+            "groupWidth": 0.7,
+            "barWidth": 0.7,
+            "legend": {
+              "displayMode": "list",
+              "placement": "right"
+            }
+          }
+        },
+
+        {
+          "id": 32,
+          "title": "Current Queue Breakdown",
+          "description": "Current persistent bytes, message count, and percentage of total storage for every Artemis queue.",
+          "type": "table",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 27
+          },
+          "targets": [
+            {
+              "expr": "sum by (queue)(broker_queue_persistent_size{job=\"messaging-service-metrics\"})",
+              "format": "table",
+              "instant": true,
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (queue)(broker_queue_message_count{job=\"messaging-service-metrics\"})",
+              "format": "table",
+              "instant": true,
+              "refId": "B"
+            },
+            {
+              "expr": "100 * sum by (queue)(broker_queue_persistent_size{job=\"messaging-service-metrics\"}) / clamp_min(sum(broker_queue_persistent_size{job=\"messaging-service-metrics\"}), 1)",
+              "format": "table",
+              "instant": true,
+              "refId": "C"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "merge",
+              "options": {}
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "Time 1": true,
+                  "Time 2": true,
+                  "Time 3": true
+                },
+                "indexByName": {
+                  "queue": 0,
+                  "Value #A": 1,
+                  "Value #B": 2,
+                  "Value #C": 3
+                },
+                "renameByName": {
+                  "queue": "Queue",
+                  "Value #A": "Persistent Data",
+                  "Value #B": "Messages",
+                  "Value #C": "% of Total"
+                }
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "custom": {
+                "align": "auto"
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Queue"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 240
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Persistent Data"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "bytes"
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "gauge",
+                      "mode": "gradient"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Messages"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "short"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "% of Total"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "percent"
+                  },
+                  {
+                    "id": "min",
+                    "value": 0
+                  },
+                  {
+                    "id": "max",
+                    "value": 100
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "gauge",
+                      "mode": "gradient"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm",
+            "sortBy": [
+              {
+                "displayName": "Persistent Data",
+                "desc": true
+              }
+            ]
+          }
+        },
+
+        {
+          "id": 400,
+          "title": "JVM Diagnostics",
+          "type": "row",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 35
+          }
+        },
+
+        {
+          "id": 41,
+          "title": "JVM GC Activity",
+          "description": "JVM garbage collection execution rates.",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 36
+          },
+          "targets": [
+            {
+              "expr": "rate(jvm_gc_collection_seconds_count{job=\"messaging-service-metrics\",gc=~\".*Young.*\"}[5m])",
+              "legendFormat": "Young GC rate",
+              "refId": "A"
+            },
+            {
+              "expr": "rate(jvm_gc_collection_seconds_count{job=\"messaging-service-metrics\",gc=~\".*Old.*\"}[5m])",
+              "legendFormat": "Old GC rate",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "min": 0,
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 10,
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            }
+          }
+        }
+      ]
+    }
+EOF
+```
+
+### Access Grafana
+
+Create an Ingress to expose Grafana through the Minikube ingress controller (this tutorial uses the NGINX addon enabled at cluster start):
+
+```bash {"stage":"grafana", "label":"create grafana ingress", "runtime":"bash"}
+kubectl apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana
+  namespace: service-app-project
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: grafana.brokerservice-monitoring.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: prometheus-grafana
+                port:
+                  number: 80
+EOF
+```
+
+Add the Minikube IP to your `/etc/hosts` so the hostname resolves locally:
+
+```bash {"stage":"grafana", "label":"configure hosts", "runtime":"bash"}
+export CLUSTER_IP=$(minikube ip --profile brokerservice-monitoring)
+echo "${CLUSTER_IP} grafana.brokerservice-monitoring.local" | sudo tee -a /etc/hosts
+echo "Grafana available at http://grafana.brokerservice-monitoring.local"
+```
+
+```bash {"stage":"grafana", "label":"get grafana password", "runtime":"bash"}
+kubectl get secret prometheus-grafana -n service-app-project -o jsonpath='{.data.admin-password}' | base64 -d && echo
+```
+
+Login at **http://grafana.brokerservice-monitoring.local** with username `admin` and the password printed above, then open the **"Artemis Broker Operational Health & Performance"** dashboard.
+
+Under normal conditions (5 msg/s, all consumers healthy) you should see:
+
+| Panel | Expected value |
+|---|---|
+| Broker Pod Ready | `1` / HEALTHY |
+| Broker Ready Replicas | `1` |
+| Total Queue Messages | Low — dominated by `ORDERS.DELIVERED` which grows intentionally |
+| Backlog With No Consumers | Reflects `ORDERS.DELIVERED` depth — growing while `master-sink` is disabled |
+| Queue Message Count | `ORDERS.NEW`, `ORDERS.PROCESSED`, `ORDERS.SHIPPED` near zero; `ORDERS.DELIVERED` growing |
+| Queue Consumer Count | ~1 consumer on each active processing queue |
+| Messages Being Delivered | Activity visible while messages are in flight |
+| Total Consumer Count | ~3 |
+| Container CPU Usage | Low and stable |
+| Container Memory Working Set % | Stable and below 70% |
+| JVM Heap Utilization % | Stable and below 70% |
+
+A growing `ORDERS.DELIVERED` queue is expected and does not indicate a pipeline failure — `master-sink` is intentionally disabled. Because `master-sink` starts at 0 replicas, `ORDERS.DELIVERED` accumulates at approximately 5 messages/sec. After about 20 seconds it should contain roughly 100 messages — a useful sanity check that the full pipeline is flowing end-to-end.
+
+The expected baseline is three JMS consumers: one each for processor, shipping, and delivery. The generator is producer-only and `master-sink` starts with zero replicas.
+
+
+> **Note:** The dashboard panels will show "No data" until the ServiceMonitor and broker metrics are configured in Section 6. The Grafana tab is useful to keep open so you can watch metrics appear as soon as the pipeline is running.
+
 ### Install the Operator
 
 ```bash {"stage":"init", "rootdir":"$initial_dir", "runtime":"bash"}
@@ -1319,842 +2147,18 @@ EOF
 
 ---
 
-## 7. Create Grafana Dashboard
+## 7. Grafana Dashboard Reference
 
-The dashboard is provisioned as a Kubernetes `ConfigMap` with the `grafana_dashboard: "1"` label. The Grafana sidecar — already configured in Section 2 — watches for ConfigMaps with that label and automatically loads them. No Helm upgrade or Grafana restart is required.
+The Grafana dashboard was provisioned in Section 2 and is already accessible. This section describes what each panel shows.
 
-The dashboard is organized into 6 rows:
+The dashboard is organized into 4 rows:
 
-| Row | Purpose |
-|---|---|
-| **Memory Overview** | Container memory %, JVM heap %, total queue persistent data, container headroom |
-| **Memory Components Over Time** | Container working set, JVM heap used, queue persistent data, container limit on one graph |
-| **Queue Memory Contribution** | Stacked persistent queue data by queue |
-| **Current Queue Breakdown** | Table: persistent data and message count per queue |
-| **Queue Message Activity** | Stacked message count by queue over time |
-| **JVM Diagnostics** | Young/Old GC collection rate |
-
-```bash {"stage":"grafana", "label":"create dashboard configmap", "runtime":"bash"}
-kubectl apply -f - <<'EOF'
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: artemis-broker-health
-  namespace: service-app-project
-  labels:
-    grafana_dashboard: "1"
-data:
-  artemis-broker-health.json: |
-    {
-      "title": "Artemis Broker - Memory & Queue Analysis",
-      "uid": "artemis-broker-memory-queue-analysis",
-      "style": "dark",
-      "tags": [
-        "artemis",
-        "amq-broker",
-        "jvm",
-        "memory",
-        "queue"
-      ],
-      "timezone": "",
-      "editable": true,
-      "graphTooltip": 1,
-      "time": {
-        "from": "now-30m",
-        "to": "now"
-      },
-      "timepicker": {},
-      "refresh": "5s",
-      "schemaVersion": 38,
-      "version": 27,
-      "panels": [
-
-        {
-          "id": 100,
-          "title": "Memory Overview",
-          "type": "row",
-          "collapsed": false,
-          "gridPos": {
-            "h": 1,
-            "w": 24,
-            "x": 0,
-            "y": 0
-          }
-        },
-
-        {
-          "id": 2,
-          "title": "Container Memory %",
-          "description": "Current messaging-service container working-set memory as a percentage of its configured Kubernetes memory limit.",
-          "type": "stat",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "gridPos": {
-            "h": 4,
-            "w": 6,
-            "x": 0,
-            "y": 1
-          },
-          "targets": [
-            {
-              "expr": "100 * sum(container_memory_working_set_bytes{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",container!=\"POD\",container!=\"\"}) / clamp_min(sum(kube_pod_container_resource_limits{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",resource=\"memory\",unit=\"byte\"}),1)",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "percent",
-              "min": 0,
-              "max": 100,
-              "color": {
-                "mode": "thresholds"
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "yellow",
-                    "value": 70
-                  },
-                  {
-                    "color": "red",
-                    "value": 85
-                  }
-                ]
-              }
-            }
-          },
-          "options": {
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ]
-            },
-            "colorMode": "background"
-          }
-        },
-
-        {
-          "id": 3,
-          "title": "JVM Heap %",
-          "description": "Current JVM heap used as a percentage of the maximum configured JVM heap.",
-          "type": "stat",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "gridPos": {
-            "h": 4,
-            "w": 6,
-            "x": 6,
-            "y": 1
-          },
-          "targets": [
-            {
-              "expr": "100 * sum(jvm_memory_used_bytes{job=\"messaging-service-metrics\",area=\"heap\"}) / clamp_min(sum(jvm_memory_max_bytes{job=\"messaging-service-metrics\",area=\"heap\"}),1)",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "percent",
-              "min": 0,
-              "max": 100,
-              "color": {
-                "mode": "thresholds"
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "yellow",
-                    "value": 70
-                  },
-                  {
-                    "color": "red",
-                    "value": 85
-                  }
-                ]
-              }
-            }
-          },
-          "options": {
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ]
-            },
-            "colorMode": "background"
-          }
-        },
-
-        {
-          "id": 4,
-          "title": "Queue Persistent Data",
-          "description": "Total persistent message data currently retained across all Artemis queues.",
-          "type": "stat",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "gridPos": {
-            "h": 4,
-            "w": 6,
-            "x": 12,
-            "y": 1
-          },
-          "targets": [
-            {
-              "expr": "sum(broker_queue_persistent_size{job=\"messaging-service-metrics\"})",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "bytes",
-              "min": 0,
-              "color": {
-                "mode": "fixed",
-                "fixedColor": "green"
-              }
-            }
-          },
-          "options": {
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ]
-            },
-            "colorMode": "value"
-          }
-        },
-
-        {
-          "id": 5,
-          "title": "Container Memory Headroom",
-          "description": "Remaining difference between the messaging-service container memory limit and current working-set memory.",
-          "type": "stat",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "gridPos": {
-            "h": 4,
-            "w": 6,
-            "x": 18,
-            "y": 1
-          },
-          "targets": [
-            {
-              "expr": "sum(kube_pod_container_resource_limits{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",resource=\"memory\",unit=\"byte\"}) - sum(container_memory_working_set_bytes{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",container!=\"POD\",container!=\"\"})",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "bytes",
-              "min": 0,
-              "color": {
-                "mode": "thresholds"
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "red",
-                    "value": null
-                  },
-                  {
-                    "color": "yellow",
-                    "value": 104857600
-                  },
-                  {
-                    "color": "green",
-                    "value": 314572800
-                  }
-                ]
-              }
-            }
-          },
-          "options": {
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ]
-            },
-            "colorMode": "background"
-          }
-        },
-
-        {
-          "id": 200,
-          "title": "Container, JVM & Queue Memory",
-          "type": "row",
-          "collapsed": false,
-          "gridPos": {
-            "h": 1,
-            "w": 24,
-            "x": 0,
-            "y": 5
-          }
-        },
-
-        {
-          "id": 10,
-          "title": "Container vs JVM vs Queue Memory",
-          "description": "Memory comparison for the messaging-service Artemis broker.",
-          "type": "timeseries",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "gridPos": {
-            "h": 12,
-            "w": 24,
-            "x": 0,
-            "y": 6
-          },
-          "targets": [
-            {
-              "expr": "sum(container_memory_working_set_bytes{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",container!=\"POD\",container!=\"\"})",
-              "legendFormat": "Container Working Set",
-              "refId": "A"
-            },
-            {
-              "expr": "sum(jvm_memory_used_bytes{job=\"messaging-service-metrics\",area=\"heap\"})",
-              "legendFormat": "JVM Heap Used",
-              "refId": "B"
-            },
-            {
-              "expr": "sum(broker_queue_persistent_size{job=\"messaging-service-metrics\"})",
-              "legendFormat": "Queue Persistent Data",
-              "refId": "C"
-            },
-            {
-              "expr": "sum(kube_pod_container_resource_limits{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",resource=\"memory\",unit=\"byte\"})",
-              "legendFormat": "Container Memory Limit",
-              "refId": "D"
-            },
-            {
-              "expr": "sum(jvm_memory_max_bytes{job=\"messaging-service-metrics\",area=\"heap\"})",
-              "legendFormat": "JVM Heap Max",
-              "refId": "E"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "bytes",
-              "min": 0,
-              "custom": {
-                "drawStyle": "line",
-                "lineWidth": 2,
-                "fillOpacity": 0,
-                "showPoints": "never",
-                "spanNulls": true,
-                "axisPlacement": "left",
-                "scaleDistribution": {
-                  "type": "linear"
-                }
-              }
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byFrameRefID",
-                  "options": "A"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Container Working Set"
-                  },
-                  {
-                    "id": "color",
-                    "value": {
-                      "mode": "fixed",
-                      "fixedColor": "purple"
-                    }
-                  },
-                  {
-                    "id": "custom.lineWidth",
-                    "value": 3
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byFrameRefID",
-                  "options": "B"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "JVM Heap Used"
-                  },
-                  {
-                    "id": "color",
-                    "value": {
-                      "mode": "fixed",
-                      "fixedColor": "orange"
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byFrameRefID",
-                  "options": "C"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Queue Persistent Data"
-                  },
-                  {
-                    "id": "color",
-                    "value": {
-                      "mode": "fixed",
-                      "fixedColor": "green"
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byFrameRefID",
-                  "options": "D"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Container Memory Limit"
-                  },
-                  {
-                    "id": "color",
-                    "value": {
-                      "mode": "fixed",
-                      "fixedColor": "blue"
-                    }
-                  },
-                  {
-                    "id": "custom.lineStyle",
-                    "value": {
-                      "fill": "dash",
-                      "dash": [
-                        8,
-                        4
-                      ]
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byFrameRefID",
-                  "options": "E"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "JVM Heap Max"
-                  },
-                  {
-                    "id": "color",
-                    "value": {
-                      "mode": "fixed",
-                      "fixedColor": "red"
-                    }
-                  },
-                  {
-                    "id": "custom.lineStyle",
-                    "value": {
-                      "fill": "dash",
-                      "dash": [
-                        6,
-                        4
-                      ]
-                    }
-                  }
-                ]
-              }
-            ]
-          },
-          "options": {
-            "legend": {
-              "displayMode": "table",
-              "placement": "bottom",
-              "calcs": [
-                "lastNotNull",
-                "max"
-              ]
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          }
-        },
-
-        {
-          "id": 300,
-          "title": "Queue Storage Contribution",
-          "type": "row",
-          "collapsed": false,
-          "gridPos": {
-            "h": 1,
-            "w": 24,
-            "x": 0,
-            "y": 18
-          }
-        },
-
-        {
-          "id": 31,
-          "title": "Queue Storage Contribution (Bar Chart)",
-          "description": "Persistent storage consumed by each individual Artemis queue.",
-          "type": "barchart",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 24,
-            "x": 0,
-            "y": 19
-          },
-          "targets": [
-            {
-              "expr": "sum by (queue)(broker_queue_persistent_size{job=\"messaging-service-metrics\"})",
-              "legendFormat": "{{queue}}",
-              "refId": "A",
-              "instant": true
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "bytes",
-              "min": 0,
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "fillOpacity": 85,
-                "lineWidth": 1
-              }
-            }
-          },
-          "options": {
-            "orientation": "horizontal",
-            "showValue": "always",
-            "groupWidth": 0.7,
-            "barWidth": 0.7,
-            "legend": {
-              "displayMode": "list",
-              "placement": "right"
-            }
-          }
-        },
-
-        {
-          "id": 32,
-          "title": "Current Queue Breakdown",
-          "description": "Current persistent bytes, message count, and percentage of total storage for every Artemis queue.",
-          "type": "table",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 24,
-            "x": 0,
-            "y": 27
-          },
-          "targets": [
-            {
-              "expr": "sum by (queue)(broker_queue_persistent_size{job=\"messaging-service-metrics\"})",
-              "format": "table",
-              "instant": true,
-              "refId": "A"
-            },
-            {
-              "expr": "sum by (queue)(broker_queue_message_count{job=\"messaging-service-metrics\"})",
-              "format": "table",
-              "instant": true,
-              "refId": "B"
-            },
-            {
-              "expr": "100 * sum by (queue)(broker_queue_persistent_size{job=\"messaging-service-metrics\"}) / clamp_min(sum(broker_queue_persistent_size{job=\"messaging-service-metrics\"}), 1)",
-              "format": "table",
-              "instant": true,
-              "refId": "C"
-            }
-          ],
-          "transformations": [
-            {
-              "id": "merge",
-              "options": {}
-            },
-            {
-              "id": "organize",
-              "options": {
-                "excludeByName": {
-                  "Time": true,
-                  "Time 1": true,
-                  "Time 2": true,
-                  "Time 3": true
-                },
-                "indexByName": {
-                  "queue": 0,
-                  "Value #A": 1,
-                  "Value #B": 2,
-                  "Value #C": 3
-                },
-                "renameByName": {
-                  "queue": "Queue",
-                  "Value #A": "Persistent Data",
-                  "Value #B": "Messages",
-                  "Value #C": "% of Total"
-                }
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "thresholds"
-              },
-              "custom": {
-                "align": "auto"
-              }
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Queue"
-                },
-                "properties": [
-                  {
-                    "id": "custom.width",
-                    "value": 240
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Persistent Data"
-                },
-                "properties": [
-                  {
-                    "id": "unit",
-                    "value": "bytes"
-                  },
-                  {
-                    "id": "custom.cellOptions",
-                    "value": {
-                      "type": "gauge",
-                      "mode": "gradient"
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Messages"
-                },
-                "properties": [
-                  {
-                    "id": "unit",
-                    "value": "short"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "% of Total"
-                },
-                "properties": [
-                  {
-                    "id": "unit",
-                    "value": "percent"
-                  },
-                  {
-                    "id": "min",
-                    "value": 0
-                  },
-                  {
-                    "id": "max",
-                    "value": 100
-                  },
-                  {
-                    "id": "custom.cellOptions",
-                    "value": {
-                      "type": "gauge",
-                      "mode": "gradient"
-                    }
-                  }
-                ]
-              }
-            ]
-          },
-          "options": {
-            "showHeader": true,
-            "cellHeight": "sm",
-            "sortBy": [
-              {
-                "displayName": "Persistent Data",
-                "desc": true
-              }
-            ]
-          }
-        },
-
-        {
-          "id": 400,
-          "title": "JVM Diagnostics",
-          "type": "row",
-          "collapsed": false,
-          "gridPos": {
-            "h": 1,
-            "w": 24,
-            "x": 0,
-            "y": 35
-          }
-        },
-
-        {
-          "id": 41,
-          "title": "JVM GC Activity",
-          "description": "JVM garbage collection execution rates.",
-          "type": "timeseries",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 24,
-            "x": 0,
-            "y": 36
-          },
-          "targets": [
-            {
-              "expr": "rate(jvm_gc_collection_seconds_count{job=\"messaging-service-metrics\",gc=~\".*Young.*\"}[5m])",
-              "legendFormat": "Young GC rate",
-              "refId": "A"
-            },
-            {
-              "expr": "rate(jvm_gc_collection_seconds_count{job=\"messaging-service-metrics\",gc=~\".*Old.*\"}[5m])",
-              "legendFormat": "Old GC rate",
-              "refId": "B"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "ops",
-              "min": 0,
-              "custom": {
-                "drawStyle": "line",
-                "lineWidth": 2,
-                "fillOpacity": 10,
-                "showPoints": "never",
-                "spanNulls": true
-              }
-            }
-          },
-          "options": {
-            "legend": {
-              "displayMode": "table",
-              "placement": "bottom",
-              "calcs": [
-                "lastNotNull",
-                "max"
-              ]
-            }
-          }
-        }
-      ]
-    }
-EOF
-```
-
-### Access Grafana
-
-Create an Ingress to expose Grafana through the Minikube ingress controller (this tutorial uses the NGINX addon enabled at cluster start):
-
-```bash {"stage":"grafana", "label":"create grafana ingress", "runtime":"bash"}
-kubectl apply -f - <<EOF
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: grafana
-  namespace: service-app-project
-spec:
-  ingressClassName: nginx
-  rules:
-    - host: grafana.brokerservice-monitoring.local
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: prometheus-grafana
-                port:
-                  number: 80
-EOF
-```
-
-Add the Minikube IP to your `/etc/hosts` so the hostname resolves locally:
-
-```bash {"stage":"grafana", "label":"configure hosts", "runtime":"bash"}
-export CLUSTER_IP=$(minikube ip --profile brokerservice-monitoring)
-echo "${CLUSTER_IP} grafana.brokerservice-monitoring.local" | sudo tee -a /etc/hosts
-echo "Grafana available at http://grafana.brokerservice-monitoring.local"
-```
-
-```bash {"stage":"grafana", "label":"get grafana password", "runtime":"bash"}
-kubectl get secret prometheus-grafana -n service-app-project -o jsonpath='{.data.admin-password}' | base64 -d && echo
-```
-
-Login at **http://grafana.brokerservice-monitoring.local** with username `admin` and the password printed above, then open the **"Artemis Broker Operational Health & Performance"** dashboard.
-
-Under normal conditions (5 msg/s, all consumers healthy) you should see:
-
-| Panel | Expected value |
-|---|---|
-| Broker Pod Ready | `1` / HEALTHY |
-| Broker Ready Replicas | `1` |
-| Total Queue Messages | Low — dominated by `ORDERS.DELIVERED` which grows intentionally |
-| Backlog With No Consumers | Reflects `ORDERS.DELIVERED` depth — growing while `master-sink` is disabled |
-| Queue Message Count | `ORDERS.NEW`, `ORDERS.PROCESSED`, `ORDERS.SHIPPED` near zero; `ORDERS.DELIVERED` growing |
-| Queue Consumer Count | ~1 consumer on each active processing queue |
-| Messages Being Delivered | Activity visible while messages are in flight |
-| Total Consumer Count | ~3 |
-| Container CPU Usage | Low and stable |
-| Container Memory Working Set % | Stable and below 70% |
-| JVM Heap Utilization % | Stable and below 70% |
-
-A growing `ORDERS.DELIVERED` queue is expected and does not indicate a pipeline failure — `master-sink` is intentionally disabled. Because `master-sink` starts at 0 replicas, `ORDERS.DELIVERED` accumulates at approximately 5 messages/sec. After about 20 seconds it should contain roughly 100 messages — a useful sanity check that the full pipeline is flowing end-to-end.
-
-The expected baseline is three JMS consumers: one each for processor, shipping, and delivery. The generator is producer-only and `master-sink` starts with zero replicas.
-
----
+| Row | Panels | What to look for |
+|---|---|---|
+| **Memory Overview** | Container Memory %, JVM Heap %, Queue Persistent Data, Container Memory Headroom | Threshold colouring: green < 70 %, yellow 70–85 %, red > 85 % |
+| **Container, JVM & Queue Memory** | Single timeseries: Container Working Set (purple), JVM Heap Used (orange), Queue Persistent Data (green), Container Memory Limit (blue dashed) | All four lines share one left Y-axis in bytes. Queue Persistent Data is a broker storage metric — it does not directly equal JVM heap usage. |
+| **Queue Storage Contribution** | Horizontal bar chart (current snapshot) and table with Persistent Data, Messages, % of Total | Identify which queues are retaining the most persistent data right now. |
+| **JVM Diagnostics** | GC collection rate: Young GC (green), Old GC (red) | Elevated Old GC rate together with high JVM heap % can indicate memory pressure. |
 
 ## 8. Operations Scenarios
 
