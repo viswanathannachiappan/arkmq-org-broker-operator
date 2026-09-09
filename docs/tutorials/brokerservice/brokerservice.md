@@ -84,18 +84,105 @@ minikube start \
   --disk-size 20000
 minikube addons enable ingress --profile brokerservice-monitoring
 ```
+```shell markdown_runner
+* [brokerservice-monitoring] minikube v1.38.1 on Fedora 44
+* Using the docker driver based on existing profile
+* Starting "brokerservice-monitoring" primary control-plane node in "brokerservice-monitoring" cluster
+* Pulling base image v0.0.50 ...
+  - Using image gcr.io/k8s-minikube/storage-provisioner:v5
+* Verifying Kubernetes components...
+* Enabled addons: default-storageclass, storage-provisioner
+* Done! kubectl is now configured to use "brokerservice-monitoring" cluster and "default" namespace by default
+* ingress is an addon maintained by Kubernetes. For any concerns contact minikube on GitHub.
+You can view the list of minikube maintainers at: https://github.com/kubernetes/minikube/blob/master/OWNERS
+  - Using image registry.k8s.io/ingress-nginx/controller:v1.14.3
+  - Using image registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.6.7
+  - Using image registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.6.7
+* Verifying ingress addon...
+* The 'ingress' addon is enabled
+! You cannot change the memory size for an existing minikube cluster. Please first delete the cluster.
+```
 
 ### Build the Camel Pipeline Image
 
-The Camel pipeline image is built directly into Minikube's image store so no
-registry push is needed. The source lives alongside this tutorial in
-[`camel-jms-app/`](camel-jms-app/). The `Containerfile` is a multi-stage build
-— Maven and the JDK run inside the builder container, so no local JDK or Maven
-installation is required.
+The Camel pipeline image is built using your local Docker daemon (which has
+internet access for Maven dependencies) and then loaded directly into Minikube.
+The source lives alongside this tutorial in [`camel-jms-app/`](camel-jms-app/).
+The `Containerfile` is a multi-stage build — Maven and the JDK run inside the
+builder container, so no local JDK or Maven installation is required.
 
 ```bash {"stage":"init", "label":"build camel jms image", "rootdir":"$initial_dir", "runtime":"bash"}
-eval $(minikube docker-env --profile brokerservice-monitoring)
 docker build -f docs/tutorials/brokerservice/camel-jms-app/Containerfile docs/tutorials/brokerservice/camel-jms-app/ -t camel-jms-app:latest
+minikube image load camel-jms-app:latest --profile brokerservice-monitoring
+```
+```shell markdown_runner
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Containerfile
+#1 transferring dockerfile: 1.43kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for registry.access.redhat.com/ubi9/openjdk-21:1.21
+#2 DONE 0.6s
+
+#3 [internal] load metadata for registry.access.redhat.com/ubi9/openjdk-25-runtime:1.24
+#3 DONE 0.6s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 217B done
+#4 DONE 0.0s
+
+#5 [stage-1 1/5] FROM registry.access.redhat.com/ubi9/openjdk-25-runtime:1.24@sha256:5d4ecb5d16665e601f3e7b3beea51801f8b87b57c2a526848b054104df314cb0
+#5 resolve registry.access.redhat.com/ubi9/openjdk-25-runtime:1.24@sha256:5d4ecb5d16665e601f3e7b3beea51801f8b87b57c2a526848b054104df314cb0 0.1s done
+#5 DONE 0.1s
+
+#6 [builder 1/7] FROM registry.access.redhat.com/ubi9/openjdk-21:1.21@sha256:fa55b9f126da0d855e3709473e2237ad500f8d8e6a059f99b3ca10cdc2c5de58
+#6 resolve registry.access.redhat.com/ubi9/openjdk-21:1.21@sha256:fa55b9f126da0d855e3709473e2237ad500f8d8e6a059f99b3ca10cdc2c5de58 0.1s done
+#6 DONE 0.1s
+
+#7 [internal] load build context
+#7 transferring context: 890B done
+#7 DONE 0.0s
+
+#8 [builder 2/7] WORKDIR /build
+#8 CACHED
+
+#9 [builder 5/7] RUN mvn dependency:resolve-plugins dependency:resolve -q
+#9 CACHED
+
+#10 [stage-1 2/5] COPY --chown=185 --from=builder /build/target/quarkus-app/lib/       /deployments/lib/
+#10 CACHED
+
+#11 [stage-1 3/5] COPY --chown=185 --from=builder /build/target/quarkus-app/*.jar       /deployments/
+#11 CACHED
+
+#12 [stage-1 4/5] COPY --chown=185 --from=builder /build/target/quarkus-app/app/        /deployments/app/
+#12 CACHED
+
+#13 [builder 6/7] COPY src/ src/
+#13 CACHED
+
+#14 [builder 4/7] COPY pom.xml pom.xml
+#14 CACHED
+
+#15 [builder 7/7] RUN mvn package -DskipTests -q
+#15 CACHED
+
+#16 [builder 3/7] RUN microdnf install -y maven --setopt=install_weak_deps=0 && microdnf clean all
+#16 CACHED
+
+#17 [stage-1 5/5] COPY --chown=185 --from=builder /build/target/quarkus-app/quarkus/    /deployments/quarkus/
+#17 CACHED
+
+#18 exporting to image
+#18 exporting layers done
+#18 exporting manifest sha256:54e1acadb8a72fab196b6e0eb726d86f81108d1532095cb1e641e7d62a1669bf done
+#18 exporting config sha256:54081b7726d6a8b49c24b5b9430b8163871ed77003e0be974611d6db0a8e9e57 done
+#18 exporting attestation manifest sha256:b7236135ed9e853b86e53b48b3134de487f9753460f5279f9537013b9f5d74a3 0.0s done
+#18 exporting manifest list sha256:e0ae805ebdc041bbde2333f7e04c6fe1127d6a0888b872cfeab18f5ef34683b2 0.0s done
+#18 naming to docker.io/library/camel-jms-app:latest done
+#18 unpacking to docker.io/library/camel-jms-app:latest 0.0s done
+#18 DONE 0.1s
 ```
 
 The first build takes a few minutes while Maven downloads dependencies and
@@ -108,11 +195,66 @@ layer and are much faster.
 kubectl create namespace service-app-project
 kubectl config set-context --current --namespace=service-app-project
 ```
+```shell markdown_runner
+namespace/service-app-project created
+Context "brokerservice-monitoring" modified.
+```
 
 ### Install Cert-Manager
 
 ```bash {"stage":"init", "label":"install cert-manager", "runtime":"bash"}
 kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.5/cert-manager.yaml
+```
+```shell markdown_runner
+namespace/cert-manager created
+customresourcedefinition.apiextensions.k8s.io/certificaterequests.cert-manager.io created
+customresourcedefinition.apiextensions.k8s.io/certificates.cert-manager.io created
+customresourcedefinition.apiextensions.k8s.io/challenges.acme.cert-manager.io created
+customresourcedefinition.apiextensions.k8s.io/clusterissuers.cert-manager.io created
+customresourcedefinition.apiextensions.k8s.io/issuers.cert-manager.io created
+customresourcedefinition.apiextensions.k8s.io/orders.acme.cert-manager.io created
+serviceaccount/cert-manager-cainjector created
+serviceaccount/cert-manager created
+serviceaccount/cert-manager-webhook created
+clusterrole.rbac.authorization.k8s.io/cert-manager-cainjector created
+clusterrole.rbac.authorization.k8s.io/cert-manager-controller-issuers created
+clusterrole.rbac.authorization.k8s.io/cert-manager-controller-clusterissuers created
+clusterrole.rbac.authorization.k8s.io/cert-manager-controller-certificates created
+clusterrole.rbac.authorization.k8s.io/cert-manager-controller-orders created
+clusterrole.rbac.authorization.k8s.io/cert-manager-controller-challenges created
+clusterrole.rbac.authorization.k8s.io/cert-manager-controller-ingress-shim created
+clusterrole.rbac.authorization.k8s.io/cert-manager-cluster-view created
+clusterrole.rbac.authorization.k8s.io/cert-manager-view created
+clusterrole.rbac.authorization.k8s.io/cert-manager-edit created
+clusterrole.rbac.authorization.k8s.io/cert-manager-controller-approve:cert-manager-io created
+clusterrole.rbac.authorization.k8s.io/cert-manager-controller-certificatesigningrequests created
+clusterrole.rbac.authorization.k8s.io/cert-manager-webhook:subjectaccessreviews created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-cainjector created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-controller-issuers created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-controller-clusterissuers created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-controller-certificates created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-controller-orders created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-controller-challenges created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-controller-ingress-shim created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-controller-approve:cert-manager-io created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-controller-certificatesigningrequests created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-webhook:subjectaccessreviews created
+role.rbac.authorization.k8s.io/cert-manager-cainjector:leaderelection created
+role.rbac.authorization.k8s.io/cert-manager:leaderelection created
+role.rbac.authorization.k8s.io/cert-manager-tokenrequest created
+role.rbac.authorization.k8s.io/cert-manager-webhook:dynamic-serving created
+rolebinding.rbac.authorization.k8s.io/cert-manager-cainjector:leaderelection created
+rolebinding.rbac.authorization.k8s.io/cert-manager:leaderelection created
+rolebinding.rbac.authorization.k8s.io/cert-manager-cert-manager-tokenrequest created
+rolebinding.rbac.authorization.k8s.io/cert-manager-webhook:dynamic-serving created
+service/cert-manager-cainjector created
+service/cert-manager created
+service/cert-manager-webhook created
+deployment.apps/cert-manager-cainjector created
+deployment.apps/cert-manager created
+deployment.apps/cert-manager-webhook created
+mutatingwebhookconfiguration.admissionregistration.k8s.io/cert-manager-webhook created
+validatingwebhookconfiguration.admissionregistration.k8s.io/cert-manager-webhook created
 ```
 
 Wait for `cert-manager` to be ready:
@@ -120,15 +262,48 @@ Wait for `cert-manager` to be ready:
 ```bash {"stage":"init", "label":"wait for cert-manager", "runtime":"bash"}
 kubectl wait deployment --for=condition=Available -n cert-manager --timeout=600s cert-manager cert-manager-cainjector cert-manager-webhook
 ```
+```shell markdown_runner
+deployment.apps/cert-manager condition met
+deployment.apps/cert-manager-cainjector condition met
+deployment.apps/cert-manager-webhook condition met
+```
 
 ### Install Trust Manager
 
 ```bash {"stage":"init", "label":"add jetstack helm repo", "runtime":"bash"}
 helm repo add jetstack https://charts.jetstack.io --force-update
 ```
+```shell markdown_runner
+"jetstack" has been added to your repositories
+```
 
 ```bash {"stage":"init", "label":"install trust-manager", "runtime":"bash"}
 helm upgrade trust-manager jetstack/trust-manager --install --namespace cert-manager --set secretTargets.enabled=true --set secretTargets.authorizedSecretsAll=true --wait
+```
+```shell markdown_runner
+Release "trust-manager" does not exist. Installing it now.
+NAME: trust-manager
+LAST DEPLOYED: Wed Sep  9 13:14:55 2026
+NAMESPACE: cert-manager
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+⚠️  WARNING: Consider increasing the Helm value `replicaCount` to 2 if you require high availability.
+⚠️  WARNING: Consider setting the Helm value `podDisruptionBudget.enabled` to true if you require high availability.
+
+trust-manager v0.24.0 has been deployed successfully!
+Your installation includes a default CA package, using the following
+default CA package image:
+
+:
+
+It's imperative that you keep the default CA package image up to date.
+To find out more about securely running trust-manager and to get started
+with creating your first bundle, check out the documentation on the
+cert-manager website:
+
+https://cert-manager.io/docs/projects/trust-manager/
 ```
 
 ### Install kube-prometheus-stack
@@ -136,6 +311,13 @@ helm upgrade trust-manager jetstack/trust-manager --install --namespace cert-man
 ```bash {"stage":"init", "label":"add prometheus helm repo", "runtime":"bash"}
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
+```
+```shell markdown_runner
+"prometheus-community" already exists with the same configuration, skipping
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "jetstack" chart repository
+...Successfully got an update from the "prometheus-community" chart repository
+Update Complete. ⎈Happy Helming!⎈
 ```
 
 ```bash {"stage":"init", "label":"install kube-prometheus-stack", "runtime":"bash"}
@@ -150,12 +332,45 @@ helm upgrade -i prometheus prometheus-community/kube-prometheus-stack \
   --set kubeScheduler.enabled=false \
   --wait
 ```
+```shell markdown_runner
+Release "prometheus" does not exist. Installing it now.
+NAME: prometheus
+LAST DEPLOYED: Wed Sep  9 13:15:20 2026
+NAMESPACE: service-app-project
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+kube-prometheus-stack has been installed. Check its status by running:
+  kubectl --namespace service-app-project get pods -l "release=prometheus"
+
+Get Grafana 'admin' user password by running:
+
+  kubectl --namespace service-app-project get secrets prometheus-grafana -o jsonpath="{.data.admin-password}" | base64 -d ; echo
+
+Access Grafana local instance:
+
+  export POD_NAME=$(kubectl --namespace service-app-project get pod -l "app.kubernetes.io/name=grafana,app.kubernetes.io/instance=prometheus" -oname)
+  kubectl --namespace service-app-project port-forward $POD_NAME 3000
+
+Get your grafana admin user password by running:
+
+  kubectl get secret --namespace service-app-project -l app.kubernetes.io/component=admin-secret -o jsonpath="{.items[0].data.admin-password}" | base64 --decode ; echo
+
+
+Visit https://github.com/prometheus-operator/kube-prometheus for instructions on how to create & configure Alertmanager and Prometheus instances using the Operator.
+```
 
 Wait for all monitoring components:
 
 ```bash {"stage":"init", "label":"wait for prometheus stack", "runtime":"bash"}
 kubectl wait deployment --for=condition=Available -n service-app-project prometheus-grafana prometheus-kube-prometheus-operator --timeout=300s
 kubectl wait statefulset --for=jsonpath='{.status.readyReplicas}'=1 -n service-app-project prometheus-prometheus-kube-prometheus-prometheus --timeout=300s
+```
+```shell markdown_runner
+deployment.apps/prometheus-grafana condition met
+deployment.apps/prometheus-kube-prometheus-operator condition met
+statefulset.apps/prometheus-prometheus-kube-prometheus-prometheus condition met
 ```
 
 
@@ -195,12 +410,11 @@ data:
       "timepicker": {},
       "refresh": "5s",
       "schemaVersion": 38,
-      "version": 27,
+      "version": 34,
       "panels": [
-
         {
-          "id": 100,
-          "title": "Memory Overview",
+          "id": 200,
+          "title": "Memory & Queue Performance",
           "type": "row",
           "collapsed": false,
           "gridPos": {
@@ -210,234 +424,6 @@ data:
             "y": 0
           }
         },
-
-        {
-          "id": 2,
-          "title": "Container Memory %",
-          "description": "Current messaging-service container working-set memory as a percentage of its configured Kubernetes memory limit.",
-          "type": "stat",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "gridPos": {
-            "h": 4,
-            "w": 6,
-            "x": 0,
-            "y": 1
-          },
-          "targets": [
-            {
-              "expr": "100 * sum(container_memory_working_set_bytes{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",container!=\"POD\",container!=\"\"}) / clamp_min(sum(kube_pod_container_resource_limits{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",resource=\"memory\",unit=\"byte\"}),1)",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "percent",
-              "min": 0,
-              "max": 100,
-              "color": {
-                "mode": "thresholds"
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "yellow",
-                    "value": 70
-                  },
-                  {
-                    "color": "red",
-                    "value": 85
-                  }
-                ]
-              }
-            }
-          },
-          "options": {
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ]
-            },
-            "colorMode": "background"
-          }
-        },
-
-        {
-          "id": 3,
-          "title": "JVM Heap %",
-          "description": "Current JVM heap used as a percentage of the maximum configured JVM heap.",
-          "type": "stat",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "gridPos": {
-            "h": 4,
-            "w": 6,
-            "x": 6,
-            "y": 1
-          },
-          "targets": [
-            {
-              "expr": "100 * sum(jvm_memory_used_bytes{job=\"messaging-service-metrics\",area=\"heap\"}) / clamp_min(sum(jvm_memory_max_bytes{job=\"messaging-service-metrics\",area=\"heap\"}),1)",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "percent",
-              "min": 0,
-              "max": 100,
-              "color": {
-                "mode": "thresholds"
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "yellow",
-                    "value": 70
-                  },
-                  {
-                    "color": "red",
-                    "value": 85
-                  }
-                ]
-              }
-            }
-          },
-          "options": {
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ]
-            },
-            "colorMode": "background"
-          }
-        },
-
-        {
-          "id": 4,
-          "title": "Queue Persistent Data",
-          "description": "Total persistent message data currently retained across all Artemis queues.",
-          "type": "stat",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "gridPos": {
-            "h": 4,
-            "w": 6,
-            "x": 12,
-            "y": 1
-          },
-          "targets": [
-            {
-              "expr": "sum(broker_queue_persistent_size{job=\"messaging-service-metrics\"})",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "bytes",
-              "min": 0,
-              "color": {
-                "mode": "fixed",
-                "fixedColor": "green"
-              }
-            }
-          },
-          "options": {
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ]
-            },
-            "colorMode": "value"
-          }
-        },
-
-        {
-          "id": 5,
-          "title": "Container Memory Headroom",
-          "description": "Remaining difference between the messaging-service container memory limit and current working-set memory.",
-          "type": "stat",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "gridPos": {
-            "h": 4,
-            "w": 6,
-            "x": 18,
-            "y": 1
-          },
-          "targets": [
-            {
-              "expr": "sum(kube_pod_container_resource_limits{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",resource=\"memory\",unit=\"byte\"}) - sum(container_memory_working_set_bytes{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",container!=\"POD\",container!=\"\"})",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "bytes",
-              "min": 0,
-              "color": {
-                "mode": "thresholds"
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "red",
-                    "value": null
-                  },
-                  {
-                    "color": "yellow",
-                    "value": 104857600
-                  },
-                  {
-                    "color": "green",
-                    "value": 314572800
-                  }
-                ]
-              }
-            }
-          },
-          "options": {
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ]
-            },
-            "colorMode": "background"
-          }
-        },
-
-        {
-          "id": 200,
-          "title": "Container, JVM & Queue Memory",
-          "type": "row",
-          "collapsed": false,
-          "gridPos": {
-            "h": 1,
-            "w": 24,
-            "x": 0,
-            "y": 5
-          }
-        },
-
         {
           "id": 10,
           "title": "Container vs JVM vs Queue Memory",
@@ -448,10 +434,10 @@ data:
             "uid": "prometheus"
           },
           "gridPos": {
-            "h": 12,
+            "h": 14,
             "w": 24,
             "x": 0,
-            "y": 6
+            "y": 1
           },
           "targets": [
             {
@@ -470,7 +456,7 @@ data:
               "refId": "C"
             },
             {
-              "expr": "sum(kube_pod_container_resource_limits{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",resource=\"memory\",unit=\"byte\"})",
+              "expr": "sum(kube_pod_container_resource_limits{namespace=\"service-app-project\",pod=~\"messaging-service-ss-.*\",resource=\"memory\"})",
               "legendFormat": "Container Memory Limit",
               "refId": "D"
             },
@@ -536,6 +522,10 @@ data:
                       "mode": "fixed",
                       "fixedColor": "orange"
                     }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 2
                   }
                 ]
               },
@@ -555,6 +545,10 @@ data:
                       "mode": "fixed",
                       "fixedColor": "green"
                     }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 2
                   }
                 ]
               },
@@ -584,6 +578,10 @@ data:
                         4
                       ]
                     }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 2
                   }
                 ]
               },
@@ -613,6 +611,10 @@ data:
                         4
                       ]
                     }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 2
                   }
                 ]
               }
@@ -633,82 +635,32 @@ data:
             }
           }
         },
-
         {
           "id": 300,
-          "title": "Queue Storage Contribution",
+          "title": "Queue Storage Breakdown",
           "type": "row",
           "collapsed": false,
           "gridPos": {
             "h": 1,
             "w": 24,
             "x": 0,
-            "y": 18
+            "y": 15
           }
         },
-
-        {
-          "id": 31,
-          "title": "Queue Storage Contribution (Bar Chart)",
-          "description": "Persistent storage consumed by each individual Artemis queue.",
-          "type": "barchart",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 24,
-            "x": 0,
-            "y": 19
-          },
-          "targets": [
-            {
-              "expr": "sum by (queue)(broker_queue_persistent_size{job=\"messaging-service-metrics\"})",
-              "legendFormat": "{{queue}}",
-              "refId": "A",
-              "instant": true
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "bytes",
-              "min": 0,
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "fillOpacity": 85,
-                "lineWidth": 1
-              }
-            }
-          },
-          "options": {
-            "orientation": "horizontal",
-            "showValue": "always",
-            "groupWidth": 0.7,
-            "barWidth": 0.7,
-            "legend": {
-              "displayMode": "list",
-              "placement": "right"
-            }
-          }
-        },
-
         {
           "id": 32,
           "title": "Current Queue Breakdown",
-          "description": "Current persistent bytes, message count, and percentage of total storage for every Artemis queue.",
+          "description": "Tabular view displaying persistent storage bytes and current message count for every Artemis queue.",
           "type": "table",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
           "gridPos": {
-            "h": 8,
+            "h": 10,
             "w": 24,
             "x": 0,
-            "y": 27
+            "y": 16
           },
           "targets": [
             {
@@ -722,12 +674,6 @@ data:
               "format": "table",
               "instant": true,
               "refId": "B"
-            },
-            {
-              "expr": "100 * sum by (queue)(broker_queue_persistent_size{job=\"messaging-service-metrics\"}) / clamp_min(sum(broker_queue_persistent_size{job=\"messaging-service-metrics\"}), 1)",
-              "format": "table",
-              "instant": true,
-              "refId": "C"
             }
           ],
           "transformations": [
@@ -741,20 +687,17 @@ data:
                 "excludeByName": {
                   "Time": true,
                   "Time 1": true,
-                  "Time 2": true,
-                  "Time 3": true
+                  "Time 2": true
                 },
                 "indexByName": {
                   "queue": 0,
                   "Value #A": 1,
-                  "Value #B": 2,
-                  "Value #C": 3
+                  "Value #B": 2
                 },
                 "renameByName": {
                   "queue": "Queue",
                   "Value #A": "Persistent Data",
-                  "Value #B": "Messages",
-                  "Value #C": "% of Total"
+                  "Value #B": "Messages"
                 }
               }
             }
@@ -777,7 +720,7 @@ data:
                 "properties": [
                   {
                     "id": "custom.width",
-                    "value": 240
+                    "value": 260
                   }
                 ]
               },
@@ -809,32 +752,11 @@ data:
                   {
                     "id": "unit",
                     "value": "short"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "% of Total"
-                },
-                "properties": [
-                  {
-                    "id": "unit",
-                    "value": "percent"
-                  },
-                  {
-                    "id": "min",
-                    "value": 0
-                  },
-                  {
-                    "id": "max",
-                    "value": 100
                   },
                   {
                     "id": "custom.cellOptions",
                     "value": {
-                      "type": "gauge",
-                      "mode": "gradient"
+                      "type": "auto"
                     }
                   }
                 ]
@@ -851,75 +773,13 @@ data:
               }
             ]
           }
-        },
-
-        {
-          "id": 400,
-          "title": "JVM Diagnostics",
-          "type": "row",
-          "collapsed": false,
-          "gridPos": {
-            "h": 1,
-            "w": 24,
-            "x": 0,
-            "y": 35
-          }
-        },
-
-        {
-          "id": 41,
-          "title": "JVM GC Activity",
-          "description": "JVM garbage collection execution rates.",
-          "type": "timeseries",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 24,
-            "x": 0,
-            "y": 36
-          },
-          "targets": [
-            {
-              "expr": "rate(jvm_gc_collection_seconds_count{job=\"messaging-service-metrics\",gc=~\".*Young.*\"}[5m])",
-              "legendFormat": "Young GC rate",
-              "refId": "A"
-            },
-            {
-              "expr": "rate(jvm_gc_collection_seconds_count{job=\"messaging-service-metrics\",gc=~\".*Old.*\"}[5m])",
-              "legendFormat": "Old GC rate",
-              "refId": "B"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "ops",
-              "min": 0,
-              "custom": {
-                "drawStyle": "line",
-                "lineWidth": 2,
-                "fillOpacity": 10,
-                "showPoints": "never",
-                "spanNulls": true
-              }
-            }
-          },
-          "options": {
-            "legend": {
-              "displayMode": "table",
-              "placement": "bottom",
-              "calcs": [
-                "lastNotNull",
-                "max"
-              ]
-            }
-          }
         }
       ]
     }
 EOF
+```
+```shell markdown_runner
+configmap/artemis-broker-health created
 ```
 
 ### Access Grafana
@@ -948,6 +808,9 @@ spec:
                   number: 80
 EOF
 ```
+```shell markdown_runner
+ingress.networking.k8s.io/grafana created
+```
 
 Add the Minikube IP to your `/etc/hosts` so the hostname resolves locally:
 
@@ -956,9 +819,16 @@ export CLUSTER_IP=$(minikube ip --profile brokerservice-monitoring)
 echo "${CLUSTER_IP} grafana.brokerservice-monitoring.local" | sudo tee -a /etc/hosts
 echo "Grafana available at http://grafana.brokerservice-monitoring.local"
 ```
+```shell markdown_runner
+192.168.49.2 grafana.brokerservice-monitoring.local
+Grafana available at http://grafana.brokerservice-monitoring.local
+```
 
 ```bash {"stage":"grafana", "label":"get grafana password", "runtime":"bash"}
 kubectl get secret prometheus-grafana -n service-app-project -o jsonpath='{.data.admin-password}' | base64 -d && echo
+```
+```shell markdown_runner
+0Iy5lsZlpqvwRZUl7nYIzZSk0lZ85KOMjyuw6Ugc
 ```
 
 Login at **http://grafana.brokerservice-monitoring.local** with username `admin` and the password printed above, then open the **"Artemis Broker Operational Health & Performance"** dashboard.
@@ -991,10 +861,40 @@ The expected baseline is three JMS consumers: one each for processor, shipping, 
 ```bash {"stage":"init", "rootdir":"$initial_dir", "runtime":"bash"}
 ./deploy/install_opr.sh
 ```
+```shell markdown_runner
+Deploying operator to watch single namespace
+Client Version: 4.8.11
+Kubernetes Version: v1.35.1
+customresourcedefinition.apiextensions.k8s.io/activemqartemises.broker.amq.io created
+customresourcedefinition.apiextensions.k8s.io/activemqartemisaddresses.broker.amq.io created
+customresourcedefinition.apiextensions.k8s.io/activemqartemisscaledowns.broker.amq.io created
+customresourcedefinition.apiextensions.k8s.io/activemqartemissecurities.broker.amq.io created
+customresourcedefinition.apiextensions.k8s.io/brokers.broker.arkmq.org created
+customresourcedefinition.apiextensions.k8s.io/brokerapps.broker.arkmq.org created
+customresourcedefinition.apiextensions.k8s.io/brokerclusters.broker.arkmq.org created
+customresourcedefinition.apiextensions.k8s.io/brokerservices.broker.arkmq.org created
+serviceaccount/arkmq-org-broker-controller-manager created
+role.rbac.authorization.k8s.io/arkmq-org-broker-operator-role created
+rolebinding.rbac.authorization.k8s.io/arkmq-org-broker-operator-rolebinding created
+role.rbac.authorization.k8s.io/arkmq-org-broker-leader-election-role created
+rolebinding.rbac.authorization.k8s.io/arkmq-org-broker-leader-election-rolebinding created
+networkpolicy.networking.k8s.io/arkmq-org-broker-controller-manager-netpol created
+deployment.apps/arkmq-org-broker-controller-manager created
+```
 
 ```bash {"stage":"init", "label":"wait for the operator to be running", "runtime":"bash"}
 kubectl wait deployment arkmq-org-broker-controller-manager --for=create --timeout=240s
 kubectl wait pod --all --for=condition=Ready --namespace=service-app-project --timeout=600s
+```
+```shell markdown_runner
+deployment.apps/arkmq-org-broker-controller-manager condition met
+pod/alertmanager-prometheus-kube-prometheus-alertmanager-0 condition met
+pod/arkmq-org-broker-controller-manager-7c484b5568-xqhnz condition met
+pod/prometheus-grafana-75f9888848-vzwmz condition met
+pod/prometheus-kube-prometheus-operator-666bff8d55-tmqdv condition met
+pod/prometheus-kube-state-metrics-8466c684bc-mkr2v condition met
+pod/prometheus-prometheus-kube-prometheus-prometheus-0 condition met
+pod/prometheus-prometheus-node-exporter-dn84n condition met
 ```
 
 ---
@@ -1013,9 +913,15 @@ spec:
   selfSigned: {}
 EOF
 ```
+```shell markdown_runner
+clusterissuer.cert-manager.io/root-issuer created
+```
 
 ```bash {"stage":"deploy_certs", "label":"wait for root issuer", "runtime":"bash"}
 kubectl wait clusterissuer root-issuer --for=condition=Ready --timeout=300s
+```
+```shell markdown_runner
+clusterissuer.cert-manager.io/root-issuer condition met
 ```
 
 ```bash {"stage":"deploy_certs", "label":"create root cert", "runtime":"bash"}
@@ -1034,9 +940,15 @@ spec:
     kind: ClusterIssuer
 EOF
 ```
+```shell markdown_runner
+certificate.cert-manager.io/root-cert created
+```
 
 ```bash {"stage":"deploy_certs", "label":"wait for root cert", "runtime":"bash"}
 kubectl wait certificate root-cert --for=condition=Ready -n cert-manager --timeout=300s
+```
+```shell markdown_runner
+certificate.cert-manager.io/root-cert condition met
 ```
 
 ```bash {"stage":"deploy_certs", "label":"create signing issuer", "runtime":"bash"}
@@ -1050,9 +962,15 @@ spec:
     secretName: artemis-root-cert-secret
 EOF
 ```
+```shell markdown_runner
+clusterissuer.cert-manager.io/broker-ca-issuer created
+```
 
 ```bash {"stage":"deploy_certs", "label":"wait for signing issuer", "runtime":"bash"}
 kubectl wait clusterissuer broker-ca-issuer --for=condition=Ready --timeout=300s
+```
+```shell markdown_runner
+clusterissuer.cert-manager.io/broker-ca-issuer condition met
 ```
 
 ### Create Operator Certificate
@@ -1074,9 +992,15 @@ spec:
       key: "ca.pem"
 EOF
 ```
+```shell markdown_runner
+bundle.trust.cert-manager.io/arkmq-org-broker-manager-ca created
+```
 
 ```bash {"stage":"deploy_certs", "label":"wait for ca bundle", "runtime":"bash"}
 kubectl wait bundle arkmq-org-broker-manager-ca -n cert-manager --for=condition=Synced --timeout=300s
+```
+```shell markdown_runner
+bundle.trust.cert-manager.io/arkmq-org-broker-manager-ca condition met
 ```
 
 ```bash {"stage":"deploy_certs", "label":"create operator cert", "runtime":"bash"}
@@ -1094,9 +1018,15 @@ spec:
     kind: ClusterIssuer
 EOF
 ```
+```shell markdown_runner
+certificate.cert-manager.io/arkmq-org-broker-manager-cert created
+```
 
 ```bash {"stage":"deploy_certs", "label":"wait for operator cert", "runtime":"bash"}
 kubectl wait certificate arkmq-org-broker-manager-cert -n service-app-project --for=condition=Ready --timeout=300s
+```
+```shell markdown_runner
+certificate.cert-manager.io/arkmq-org-broker-manager-cert condition met
 ```
 
 ---
@@ -1124,9 +1054,15 @@ spec:
     kind: ClusterIssuer
 EOF
 ```
+```shell markdown_runner
+certificate.cert-manager.io/messaging-service-broker-cert created
+```
 
 ```bash {"stage":"deploy_service", "label":"wait for broker cert", "runtime":"bash"}
 kubectl wait certificate messaging-service-broker-cert -n service-app-project --for=condition=Ready --timeout=300s
+```
+```shell markdown_runner
+certificate.cert-manager.io/messaging-service-broker-cert condition met
 ```
 
 ### Deploy BrokerService
@@ -1149,11 +1085,17 @@ spec:
       value: "-Dlog4j2.level=INFO"
 EOF
 ```
+```shell markdown_runner
+brokerservice.broker.arkmq.org/messaging-service created
+```
 > The broker is configured with 1 GiB memory limit for this tutorial workload.
 
 
 ```bash {"stage":"deploy_service", "label":"wait for brokerservice", "runtime":"bash"}
 kubectl wait BrokerService messaging-service -n service-app-project --for=condition=Ready --timeout=300s
+```
+```shell markdown_runner
+brokerservice.broker.arkmq.org/messaging-service condition met
 ```
 
 ### Deploy BrokerApps
@@ -1186,9 +1128,15 @@ spec:
     kind: ClusterIssuer
 EOF
 ```
+```shell markdown_runner
+certificate.cert-manager.io/order-generator-app-cert created
+```
 
 ```bash {"stage":"deploy_app", "label":"wait for order-generator cert", "runtime":"bash"}
 kubectl wait certificate order-generator-app-cert -n service-app-project --for=condition=Ready --timeout=300s
+```
+```shell markdown_runner
+certificate.cert-manager.io/order-generator-app-cert condition met
 ```
 
 ```bash {"stage":"deploy_app", "label":"deploy order-generator brokerapp", "runtime":"bash"}
@@ -1209,9 +1157,15 @@ spec:
         - address: "ORDERS.NEW"
 EOF
 ```
+```shell markdown_runner
+brokerapp.broker.arkmq.org/order-generator created
+```
 
 ```bash {"stage":"deploy_app", "label":"wait for order-generator brokerapp", "runtime":"bash"}
 kubectl wait BrokerApp order-generator -n service-app-project --for=condition=Ready --timeout=300s
+```
+```shell markdown_runner
+brokerapp.broker.arkmq.org/order-generator condition met
 ```
 
 #### order-processor-app (Order Processor)
@@ -1231,9 +1185,15 @@ spec:
     kind: ClusterIssuer
 EOF
 ```
+```shell markdown_runner
+certificate.cert-manager.io/order-processor-app-cert created
+```
 
 ```bash {"stage":"deploy_app", "label":"wait for order-processor-app cert", "runtime":"bash"}
 kubectl wait certificate order-processor-app-cert -n service-app-project --for=condition=Ready --timeout=300s
+```
+```shell markdown_runner
+certificate.cert-manager.io/order-processor-app-cert condition met
 ```
 
 ```bash {"stage":"deploy_app", "label":"deploy order-processor-app brokerapp", "runtime":"bash"}
@@ -1258,9 +1218,15 @@ spec:
         - address: "ORDERS.PROCESSED"
 EOF
 ```
+```shell markdown_runner
+brokerapp.broker.arkmq.org/order-processor-app created
+```
 
 ```bash {"stage":"deploy_app", "label":"wait for order-processor-app brokerapp", "runtime":"bash"}
 kubectl wait BrokerApp order-processor-app -n service-app-project --for=condition=Ready --timeout=300s
+```
+```shell markdown_runner
+brokerapp.broker.arkmq.org/order-processor-app condition met
 ```
 
 #### shipping-service-app (Shipping Service)
@@ -1280,9 +1246,15 @@ spec:
     kind: ClusterIssuer
 EOF
 ```
+```shell markdown_runner
+certificate.cert-manager.io/shipping-service-app-cert created
+```
 
 ```bash {"stage":"deploy_app", "label":"wait for shipping-service-app cert", "runtime":"bash"}
 kubectl wait certificate shipping-service-app-cert -n service-app-project --for=condition=Ready --timeout=300s
+```
+```shell markdown_runner
+certificate.cert-manager.io/shipping-service-app-cert condition met
 ```
 
 ```bash {"stage":"deploy_app", "label":"deploy shipping-service-app brokerapp", "runtime":"bash"}
@@ -1307,9 +1279,15 @@ spec:
         - address: "ORDERS.SHIPPED"
 EOF
 ```
+```shell markdown_runner
+brokerapp.broker.arkmq.org/shipping-service-app created
+```
 
 ```bash {"stage":"deploy_app", "label":"wait for shipping-service-app brokerapp", "runtime":"bash"}
 kubectl wait BrokerApp shipping-service-app -n service-app-project --for=condition=Ready --timeout=300s
+```
+```shell markdown_runner
+brokerapp.broker.arkmq.org/shipping-service-app condition met
 ```
 
 #### delivery-service-app (Delivery Service)
@@ -1329,9 +1307,15 @@ spec:
     kind: ClusterIssuer
 EOF
 ```
+```shell markdown_runner
+certificate.cert-manager.io/delivery-service-app-cert created
+```
 
 ```bash {"stage":"deploy_app", "label":"wait for delivery-service-app cert", "runtime":"bash"}
 kubectl wait certificate delivery-service-app-cert -n service-app-project --for=condition=Ready --timeout=300s
+```
+```shell markdown_runner
+certificate.cert-manager.io/delivery-service-app-cert condition met
 ```
 
 ```bash {"stage":"deploy_app", "label":"deploy delivery-service-app brokerapp", "runtime":"bash"}
@@ -1356,9 +1340,15 @@ spec:
         - address: "ORDERS.DELIVERED"
 EOF
 ```
+```shell markdown_runner
+brokerapp.broker.arkmq.org/delivery-service-app created
+```
 
 ```bash {"stage":"deploy_app", "label":"wait for delivery-service-app brokerapp", "runtime":"bash"}
 kubectl wait BrokerApp delivery-service-app -n service-app-project --for=condition=Ready --timeout=300s
+```
+```shell markdown_runner
+brokerapp.broker.arkmq.org/delivery-service-app condition met
 ```
 
 ### Wait for All Apps Provisioned
@@ -1366,6 +1356,10 @@ kubectl wait BrokerApp delivery-service-app -n service-app-project --for=conditi
 ```bash {"stage":"deploy_app", "label":"wait for all apps provisioned", "runtime":"bash"}
 kubectl wait BrokerService messaging-service -n service-app-project --for=condition=AppsProvisioned --timeout=300s
 kubectl wait pod --selector=ActiveMQArtemis=messaging-service -n service-app-project --for=condition=Ready --timeout=300s
+```
+```shell markdown_runner
+brokerservice.broker.arkmq.org/messaging-service condition met
+pod/messaging-service-ss-0 condition met
 ```
 
 ### Verify BrokerApp Bindings
@@ -1376,11 +1370,24 @@ Each `BrokerApp` causes the Operator to create a binding secret containing the b
 kubectl get brokerapp -n service-app-project \
   -o custom-columns='NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status,PORT:.status.service.assignedPort,SECRET:.status.service.secret'
 ```
+```shell markdown_runner
+NAME                   READY   PORT    SECRET
+delivery-service-app   True    61619   delivery-service-app-binding-secret
+order-generator        True    61616   order-generator-binding-secret
+order-processor-app    True    61617   order-processor-app-binding-secret
+shipping-service-app   True    61618   shipping-service-app-binding-secret
+```
 
 Then confirm the secrets exist:
 
 ```bash {"stage":"deploy_app", "label":"verify binding secrets", "runtime":"bash"}
 kubectl get secret -n service-app-project | grep binding-secret
+```
+```shell markdown_runner
+delivery-service-app-binding-secret                                                   Opaque                                3      90s
+order-generator-binding-secret                                                        Opaque                                3      5m3s
+order-processor-app-binding-secret                                                    Opaque                                3      4m
+shipping-service-app-binding-secret                                                   Opaque                                3      2m30s
 ```
 
 You should see `order-generator-binding-secret`, `order-processor-app-binding-secret`, `shipping-service-app-binding-secret`, and `delivery-service-app-binding-secret` before proceeding to deploy the Camel applications.
@@ -1434,6 +1441,9 @@ stringData:
   java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
 EOF
 ```
+```shell markdown_runner
+secret/cert-pemcfg created
+```
 
 > **Note:** The `cert-pemcfg-*` Secrets used by the individual Deployments contain this same configuration. The certificate itself is not stored in these Secrets — each application's certificate comes from its own cert-manager-generated Secret.
 
@@ -1447,6 +1457,9 @@ Before deploying the application, wait for the binding Secret created for its Br
 
 ```bash {"stage":"deploy_camel", "label":"wait for order-generator binding secret", "runtime":"bash"}
 kubectl wait secret order-generator-binding-secret -n service-app-project --for=create --timeout=300s
+```
+```shell markdown_runner
+secret/order-generator-binding-secret condition met
 ```
 
 Create the PEM keystore configuration Secret for this application:
@@ -1465,6 +1478,9 @@ stringData:
     source.cert=/app/tls/client/tls.crt
   java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
 EOF
+```
+```shell markdown_runner
+secret/cert-pemcfg-generator created
 ```
 
 ```bash {"stage":"deploy_camel", "label":"deploy order-generator", "runtime":"bash"}
@@ -1536,15 +1552,24 @@ spec:
           secretName: cert-pemcfg-generator
 EOF
 ```
+```shell markdown_runner
+deployment.apps/order-generator created
+```
 
 ```bash {"stage":"deploy_camel", "label":"wait for order-generator", "runtime":"bash"}
 kubectl wait deployment order-generator -n service-app-project --for=condition=Available --timeout=300s
+```
+```shell markdown_runner
+deployment.apps/order-generator condition met
 ```
 
 ### order-processor-app (Order Processor)
 
 ```bash {"stage":"deploy_camel", "label":"wait for order-processor-app binding secret", "runtime":"bash"}
 kubectl wait secret order-processor-app-binding-secret -n service-app-project --for=create --timeout=300s
+```
+```shell markdown_runner
+secret/order-processor-app-binding-secret condition met
 ```
 
 ```bash {"stage":"deploy_camel", "label":"create order-processor-app pemcfg", "runtime":"bash"}
@@ -1561,6 +1586,9 @@ stringData:
     source.cert=/app/tls/client/tls.crt
   java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
 EOF
+```
+```shell markdown_runner
+secret/cert-pemcfg-order-processor created
 ```
 
 ```bash {"stage":"deploy_camel", "label":"deploy order-processor-app", "runtime":"bash"}
@@ -1637,9 +1665,15 @@ spec:
           secretName: cert-pemcfg-order-processor
 EOF
 ```
+```shell markdown_runner
+deployment.apps/order-processor-app created
+```
 
 ```bash {"stage":"deploy_camel", "label":"wait for order-processor-app", "runtime":"bash"}
 kubectl wait deployment order-processor-app -n service-app-project --for=condition=Available --timeout=300s
+```
+```shell markdown_runner
+deployment.apps/order-processor-app condition met
 ```
 
 ### shipping-service-app (Shipping Service)
@@ -1659,9 +1693,15 @@ stringData:
   java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
 EOF
 ```
+```shell markdown_runner
+secret/cert-pemcfg-shipping-service created
+```
 
 ```bash {"stage":"deploy_camel", "label":"wait for shipping-service-app binding secret", "runtime":"bash"}
 kubectl wait secret shipping-service-app-binding-secret -n service-app-project --for=create --timeout=300s
+```
+```shell markdown_runner
+secret/shipping-service-app-binding-secret condition met
 ```
 
 ```bash {"stage":"deploy_camel", "label":"deploy shipping-service-app", "runtime":"bash"}
@@ -1738,9 +1778,15 @@ spec:
           secretName: cert-pemcfg-shipping-service
 EOF
 ```
+```shell markdown_runner
+deployment.apps/shipping-service-app created
+```
 
 ```bash {"stage":"deploy_camel", "label":"wait for shipping-service-app", "runtime":"bash"}
 kubectl wait deployment shipping-service-app -n service-app-project --for=condition=Available --timeout=300s
+```
+```shell markdown_runner
+deployment.apps/shipping-service-app condition met
 ```
 
 ### delivery-service-app (Delivery Service)
@@ -1760,9 +1806,15 @@ stringData:
   java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
 EOF
 ```
+```shell markdown_runner
+secret/cert-pemcfg-delivery-service created
+```
 
 ```bash {"stage":"deploy_camel", "label":"wait for delivery-service-app binding secret", "runtime":"bash"}
 kubectl wait secret delivery-service-app-binding-secret -n service-app-project --for=create --timeout=300s
+```
+```shell markdown_runner
+secret/delivery-service-app-binding-secret condition met
 ```
 
 ```bash {"stage":"deploy_camel", "label":"deploy delivery-service-app", "runtime":"bash"}
@@ -1839,9 +1891,15 @@ spec:
           secretName: cert-pemcfg-delivery-service
 EOF
 ```
+```shell markdown_runner
+deployment.apps/delivery-service-app created
+```
 
 ```bash {"stage":"deploy_camel", "label":"wait for delivery-service-app", "runtime":"bash"}
 kubectl wait deployment delivery-service-app -n service-app-project --for=condition=Available --timeout=300s
+```
+```shell markdown_runner
+deployment.apps/delivery-service-app condition met
 ```
 
 ### master-sink (Optional operational drain)
@@ -1865,9 +1923,15 @@ spec:
     kind: ClusterIssuer
 EOF
 ```
+```shell markdown_runner
+certificate.cert-manager.io/master-sink-app-cert created
+```
 
 ```bash {"stage":"deploy_camel", "label":"wait for master-sink cert", "runtime":"bash"}
 kubectl wait certificate master-sink-app-cert -n service-app-project --for=condition=Ready --timeout=300s
+```
+```shell markdown_runner
+certificate.cert-manager.io/master-sink-app-cert condition met
 ```
 
 ```bash {"stage":"deploy_camel", "label":"deploy master-sink brokerapp", "runtime":"bash"}
@@ -1888,9 +1952,15 @@ spec:
           appNamespace: "service-app-project"
 EOF
 ```
+```shell markdown_runner
+brokerapp.broker.arkmq.org/master-sink-app created
+```
 
 ```bash {"stage":"deploy_camel", "label":"wait for master-sink brokerapp", "runtime":"bash"}
 kubectl wait BrokerApp master-sink-app -n service-app-project --for=condition=Ready --timeout=300s
+```
+```shell markdown_runner
+brokerapp.broker.arkmq.org/master-sink-app condition met
 ```
 
 The Camel JMS app uses the [dentrassi PEM keystore](https://github.com/ctron/pem-keystore) library to handle mTLS. The `master-sink-app-cert` Secret contains the TLS certificate and private key, which are mounted in the container at `/app/tls/client/`.
@@ -1917,9 +1987,15 @@ stringData:
   java.security: security.provider.6=de.dentrassi.crypto.pem.PemKeyStoreProvider
 EOF
 ```
+```shell markdown_runner
+secret/cert-pemcfg-sink created
+```
 
 ```bash {"stage":"deploy_camel", "label":"wait for master-sink binding secret", "runtime":"bash"}
 kubectl wait secret master-sink-app-binding-secret -n service-app-project --for=create --timeout=300s
+```
+```shell markdown_runner
+secret/master-sink-app-binding-secret condition met
 ```
 
 ```bash {"stage":"deploy_camel", "label":"deploy master-sink camel app", "runtime":"bash"}
@@ -1993,6 +2069,9 @@ spec:
           secretName: cert-pemcfg-sink
 EOF
 ```
+```shell markdown_runner
+deployment.apps/camel-jms-master-sink created
+```
 
 The Camel Deployment for master-sink is deployed at **0 replicas**. Scale it up only when you want to actively drain `ORDERS.DELIVERED`.
 
@@ -2015,17 +2094,105 @@ Check that orders are flowing through all stages:
 ```bash {"stage":"verify", "label":"check generator logs", "runtime":"bash"}
 kubectl logs -n service-app-project deployment/order-generator --tail=20
 ```
+```shell markdown_runner
+2026-09-09 12:25:01,883 INFO  [order-generator] (Camel (camel-1) thread #1 - timer://order-generator) [generator] → ORDERS.NEW | orderId=ORD-3243fe
+2026-09-09 12:25:01,921 INFO  [org.apache.qpid.jms.JmsConnection] (AmqpProvider :(372):[amqps://messaging-service.service-app-project.svc.cluster.local:61616]) Connection ID:5029634b-c29a-4dbf-ae17-2d50efcc6335:372 connected to server: amqps://messaging-service.service-app-project.svc.cluster.local:61616
+2026-09-09 12:25:02,082 INFO  [order-generator] (Camel (camel-1) thread #1 - timer://order-generator) [generator] → ORDERS.NEW | orderId=ORD-4a372a
+2026-09-09 12:25:02,108 INFO  [org.apache.qpid.jms.JmsConnection] (AmqpProvider :(373):[amqps://messaging-service.service-app-project.svc.cluster.local:61616]) Connection ID:834485bf-a7c3-4ed7-aa6d-366da27e2219:373 connected to server: amqps://messaging-service.service-app-project.svc.cluster.local:61616
+2026-09-09 12:25:02,283 INFO  [order-generator] (Camel (camel-1) thread #1 - timer://order-generator) [generator] → ORDERS.NEW | orderId=ORD-f35ff8
+2026-09-09 12:25:02,306 INFO  [org.apache.qpid.jms.JmsConnection] (AmqpProvider :(374):[amqps://messaging-service.service-app-project.svc.cluster.local:61616]) Connection ID:d5149c00-6ca3-41c3-a23f-42ae77b6a883:374 connected to server: amqps://messaging-service.service-app-project.svc.cluster.local:61616
+2026-09-09 12:25:02,482 INFO  [order-generator] (Camel (camel-1) thread #1 - timer://order-generator) [generator] → ORDERS.NEW | orderId=ORD-dac55f
+2026-09-09 12:25:02,506 INFO  [org.apache.qpid.jms.JmsConnection] (AmqpProvider :(375):[amqps://messaging-service.service-app-project.svc.cluster.local:61616]) Connection ID:d5c078c1-4edd-419b-8e21-d75fa140e78d:375 connected to server: amqps://messaging-service.service-app-project.svc.cluster.local:61616
+2026-09-09 12:25:02,683 INFO  [order-generator] (Camel (camel-1) thread #1 - timer://order-generator) [generator] → ORDERS.NEW | orderId=ORD-702533
+2026-09-09 12:25:02,707 INFO  [org.apache.qpid.jms.JmsConnection] (AmqpProvider :(376):[amqps://messaging-service.service-app-project.svc.cluster.local:61616]) Connection ID:9a12e3ac-9105-4345-8c49-ccb850d50e2d:376 connected to server: amqps://messaging-service.service-app-project.svc.cluster.local:61616
+2026-09-09 12:25:02,883 INFO  [order-generator] (Camel (camel-1) thread #1 - timer://order-generator) [generator] → ORDERS.NEW | orderId=ORD-1becca
+2026-09-09 12:25:02,908 INFO  [org.apache.qpid.jms.JmsConnection] (AmqpProvider :(377):[amqps://messaging-service.service-app-project.svc.cluster.local:61616]) Connection ID:f1ea8635-66e0-4c3b-a981-b09c128a2181:377 connected to server: amqps://messaging-service.service-app-project.svc.cluster.local:61616
+2026-09-09 12:25:03,083 INFO  [order-generator] (Camel (camel-1) thread #1 - timer://order-generator) [generator] → ORDERS.NEW | orderId=ORD-edf661
+2026-09-09 12:25:03,108 INFO  [org.apache.qpid.jms.JmsConnection] (AmqpProvider :(378):[amqps://messaging-service.service-app-project.svc.cluster.local:61616]) Connection ID:6e76e5cf-d4b7-46c3-8e05-125f65f101d1:378 connected to server: amqps://messaging-service.service-app-project.svc.cluster.local:61616
+2026-09-09 12:25:03,282 INFO  [order-generator] (Camel (camel-1) thread #1 - timer://order-generator) [generator] → ORDERS.NEW | orderId=ORD-57fe3c
+2026-09-09 12:25:03,312 INFO  [org.apache.qpid.jms.JmsConnection] (AmqpProvider :(379):[amqps://messaging-service.service-app-project.svc.cluster.local:61616]) Connection ID:caa97e55-5de4-4d42-9d4f-3a0cd1aaa5fc:379 connected to server: amqps://messaging-service.service-app-project.svc.cluster.local:61616
+2026-09-09 12:25:03,483 INFO  [order-generator] (Camel (camel-1) thread #1 - timer://order-generator) [generator] → ORDERS.NEW | orderId=ORD-3bf97d
+2026-09-09 12:25:03,509 INFO  [org.apache.qpid.jms.JmsConnection] (AmqpProvider :(380):[amqps://messaging-service.service-app-project.svc.cluster.local:61616]) Connection ID:ab30e060-efd1-464c-8f5d-9ea194a283c3:380 connected to server: amqps://messaging-service.service-app-project.svc.cluster.local:61616
+2026-09-09 12:25:03,683 INFO  [order-generator] (Camel (camel-1) thread #1 - timer://order-generator) [generator] → ORDERS.NEW | orderId=ORD-22173f
+2026-09-09 12:25:03,721 INFO  [org.apache.qpid.jms.JmsConnection] (AmqpProvider :(381):[amqps://messaging-service.service-app-project.svc.cluster.local:61616]) Connection ID:d67f5897-f1e3-4c08-aa70-375e53f019b1:381 connected to server: amqps://messaging-service.service-app-project.svc.cluster.local:61616
+```
 
 ```bash {"stage":"verify", "label":"check processor logs", "runtime":"bash"}
 kubectl logs -n service-app-project deployment/order-processor-app --tail=20
+```
+```shell markdown_runner
+2026-09-09 12:25:01,933 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] ← ORDERS.NEW | processing...
+2026-09-09 12:25:02,033 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] → ORDERS.PROCESSED | status=PROCESSED
+2026-09-09 12:25:02,125 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] ← ORDERS.NEW | processing...
+2026-09-09 12:25:02,226 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] → ORDERS.PROCESSED | status=PROCESSED
+2026-09-09 12:25:02,315 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] ← ORDERS.NEW | processing...
+2026-09-09 12:25:02,415 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] → ORDERS.PROCESSED | status=PROCESSED
+2026-09-09 12:25:02,515 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] ← ORDERS.NEW | processing...
+2026-09-09 12:25:02,615 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] → ORDERS.PROCESSED | status=PROCESSED
+2026-09-09 12:25:02,719 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] ← ORDERS.NEW | processing...
+2026-09-09 12:25:02,819 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] → ORDERS.PROCESSED | status=PROCESSED
+2026-09-09 12:25:02,917 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] ← ORDERS.NEW | processing...
+2026-09-09 12:25:03,018 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] → ORDERS.PROCESSED | status=PROCESSED
+2026-09-09 12:25:03,117 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] ← ORDERS.NEW | processing...
+2026-09-09 12:25:03,218 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] → ORDERS.PROCESSED | status=PROCESSED
+2026-09-09 12:25:03,325 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] ← ORDERS.NEW | processing...
+2026-09-09 12:25:03,425 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] → ORDERS.PROCESSED | status=PROCESSED
+2026-09-09 12:25:03,518 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] ← ORDERS.NEW | processing...
+2026-09-09 12:25:03,619 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] → ORDERS.PROCESSED | status=PROCESSED
+2026-09-09 12:25:03,732 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] ← ORDERS.NEW | processing...
+2026-09-09 12:25:03,832 INFO  [order-processor] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.NEW]) [processor] → ORDERS.PROCESSED | status=PROCESSED
 ```
 
 ```bash {"stage":"verify", "label":"check shipping logs", "runtime":"bash"}
 kubectl logs -n service-app-project deployment/shipping-service-app --tail=20
 ```
+```shell markdown_runner
+2026-09-09 12:25:02,043 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] ← ORDERS.PROCESSED | shipping...
+2026-09-09 12:25:02,068 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] → ORDERS.SHIPPED | status=SHIPPED
+2026-09-09 12:25:02,235 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] ← ORDERS.PROCESSED | shipping...
+2026-09-09 12:25:02,260 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] → ORDERS.SHIPPED | status=SHIPPED
+2026-09-09 12:25:02,425 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] ← ORDERS.PROCESSED | shipping...
+2026-09-09 12:25:02,451 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] → ORDERS.SHIPPED | status=SHIPPED
+2026-09-09 12:25:02,627 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] ← ORDERS.PROCESSED | shipping...
+2026-09-09 12:25:02,652 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] → ORDERS.SHIPPED | status=SHIPPED
+2026-09-09 12:25:02,828 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] ← ORDERS.PROCESSED | shipping...
+2026-09-09 12:25:02,853 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] → ORDERS.SHIPPED | status=SHIPPED
+2026-09-09 12:25:03,028 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] ← ORDERS.PROCESSED | shipping...
+2026-09-09 12:25:03,054 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] → ORDERS.SHIPPED | status=SHIPPED
+2026-09-09 12:25:03,228 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] ← ORDERS.PROCESSED | shipping...
+2026-09-09 12:25:03,254 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] → ORDERS.SHIPPED | status=SHIPPED
+2026-09-09 12:25:03,435 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] ← ORDERS.PROCESSED | shipping...
+2026-09-09 12:25:03,461 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] → ORDERS.SHIPPED | status=SHIPPED
+2026-09-09 12:25:03,631 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] ← ORDERS.PROCESSED | shipping...
+2026-09-09 12:25:03,657 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] → ORDERS.SHIPPED | status=SHIPPED
+2026-09-09 12:25:03,844 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] ← ORDERS.PROCESSED | shipping...
+2026-09-09 12:25:03,869 INFO  [order-shipping] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.PROCESSED]) [shipping] → ORDERS.SHIPPED | status=SHIPPED
+```
 
 ```bash {"stage":"verify", "label":"check delivery logs", "runtime":"bash"}
 kubectl logs -n service-app-project deployment/delivery-service-app --tail=20
+```
+```shell markdown_runner
+2026-09-09 12:25:02,081 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] ← ORDERS.SHIPPED | delivering...
+2026-09-09 12:25:02,106 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] → ORDERS.DELIVERED | status=DELIVERED
+2026-09-09 12:25:02,268 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] ← ORDERS.SHIPPED | delivering...
+2026-09-09 12:25:02,294 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] → ORDERS.DELIVERED | status=DELIVERED
+2026-09-09 12:25:02,462 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] ← ORDERS.SHIPPED | delivering...
+2026-09-09 12:25:02,488 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] → ORDERS.DELIVERED | status=DELIVERED
+2026-09-09 12:25:02,662 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] ← ORDERS.SHIPPED | delivering...
+2026-09-09 12:25:02,688 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] → ORDERS.DELIVERED | status=DELIVERED
+2026-09-09 12:25:02,861 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] ← ORDERS.SHIPPED | delivering...
+2026-09-09 12:25:02,886 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] → ORDERS.DELIVERED | status=DELIVERED
+2026-09-09 12:25:03,064 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] ← ORDERS.SHIPPED | delivering...
+2026-09-09 12:25:03,090 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] → ORDERS.DELIVERED | status=DELIVERED
+2026-09-09 12:25:03,265 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] ← ORDERS.SHIPPED | delivering...
+2026-09-09 12:25:03,290 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] → ORDERS.DELIVERED | status=DELIVERED
+2026-09-09 12:25:03,471 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] ← ORDERS.SHIPPED | delivering...
+2026-09-09 12:25:03,497 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] → ORDERS.DELIVERED | status=DELIVERED
+2026-09-09 12:25:03,667 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] ← ORDERS.SHIPPED | delivering...
+2026-09-09 12:25:03,692 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] → ORDERS.DELIVERED | status=DELIVERED
+2026-09-09 12:25:03,879 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] ← ORDERS.SHIPPED | delivering...
+2026-09-09 12:25:03,904 INFO  [order-delivery] (Camel (camel-1) thread #1 - JmsConsumer[ORDERS.SHIPPED]) [delivery] → ORDERS.DELIVERED | status=DELIVERED
 ```
 
 You should see log lines like:
@@ -2065,9 +2232,15 @@ spec:
     kind: ClusterIssuer
 EOF
 ```
+```shell markdown_runner
+certificate.cert-manager.io/prometheus-cert created
+```
 
 ```bash {"stage":"monitoring", "label":"wait for prometheus cert", "runtime":"bash"}
 kubectl wait certificate prometheus-cert -n service-app-project --for=condition=Ready --timeout=300s
+```
+```shell markdown_runner
+certificate.cert-manager.io/prometheus-cert condition met
 ```
 
 ### Create Metrics Service
@@ -2091,6 +2264,9 @@ spec:
       protocol: TCP
 EOF
 ```
+```shell markdown_runner
+service/messaging-service-metrics created
+```
 
 ### Create ServiceMonitor
 
@@ -2101,6 +2277,9 @@ export BROKER_POD=$(kubectl get pods \
   -o jsonpath='{.items[0].metadata.name}')
 export BROKER_FQDN="${BROKER_POD}.messaging-service-hdls-svc.service-app-project.svc.cluster.local"
 echo "Broker FQDN: ${BROKER_FQDN}"
+```
+```shell markdown_runner
+Broker FQDN: messaging-service-ss-0.messaging-service-hdls-svc.service-app-project.svc.cluster.local
 ```
 
 ```bash {"stage":"monitoring", "label":"create servicemonitor", "runtime":"bash"}
@@ -2137,6 +2316,9 @@ spec:
       insecureSkipVerify: false
 EOF
 ```
+```shell markdown_runner
+servicemonitor.monitoring.coreos.com/messaging-service-monitor created
+```
 
 ### Create Prometheus Recording Rules
 
@@ -2160,6 +2342,9 @@ spec:
     - record: artemis:total_consumer_count
       expr: sum(broker_queue_consumer_count{job="messaging-service-metrics"})
 EOF
+```
+```shell markdown_runner
+prometheusrule.monitoring.coreos.com/artemis-aggregation-rules created
 ```
 
 ---
@@ -2209,6 +2394,12 @@ kubectl set env deployment/shipping-service-app \
   -n service-app-project
 kubectl rollout status deployment/shipping-service-app -n service-app-project --timeout=120s
 ```
+```shell markdown_runner
+deployment.apps/shipping-service-app env updated
+Waiting for deployment "shipping-service-app" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "shipping-service-app" rollout to finish: 1 old replicas are pending termination...
+deployment "shipping-service-app" successfully rolled out
+```
 
 With `PROCESSING_DELAY_MS=2000` and `CONSUMER_CONCURRENCY=1`, the shipping service can process at most **0.5 msg/s** (theoretical). The generator is still producing 5 msg/s, so under idealized conditions `ORDERS.PROCESSED` should accumulate at roughly **4.5 messages per second** (5 − 0.5). The actual rate depends on JMS overhead and scheduling, but the growth will be clearly visible in Grafana within seconds.
 
@@ -2240,6 +2431,10 @@ kubectl wait deployment shipping-service-app \
   --for=condition=Available \
   --timeout=300s
 ```
+```shell markdown_runner
+deployment.apps/shipping-service-app scaled
+deployment.apps/shipping-service-app condition met
+```
 
 Scaling gives you five consumers, but they still have the 2-second processing delay — so aggregate throughput is still only ~2.5 msg/s at this point. The backlog may therefore continue growing during the rollout. The next step restores the 25 ms delay; after that rollout completes, aggregate theoretical capacity rises to ~200 msg/s — though actual throughput will be lower due to JMS and scheduling overhead. With the generator still producing 5 msg/s, the backlog can drain at up to roughly 195 msg/s under idealized conditions, so even a large accumulated backlog clears quickly:
 
@@ -2248,6 +2443,23 @@ kubectl set env deployment/shipping-service-app \
   PROCESSING_DELAY_MS=25 \
   -n service-app-project
 kubectl rollout status deployment/shipping-service-app -n service-app-project --timeout=120s
+```
+```shell markdown_runner
+deployment.apps/shipping-service-app env updated
+Waiting for deployment "shipping-service-app" rollout to finish: 0 out of 5 new replicas have been updated...
+Waiting for deployment "shipping-service-app" rollout to finish: 0 out of 5 new replicas have been updated...
+Waiting for deployment "shipping-service-app" rollout to finish: 2 out of 5 new replicas have been updated...
+Waiting for deployment "shipping-service-app" rollout to finish: 3 out of 5 new replicas have been updated...
+Waiting for deployment "shipping-service-app" rollout to finish: 3 out of 5 new replicas have been updated...
+Waiting for deployment "shipping-service-app" rollout to finish: 3 out of 5 new replicas have been updated...
+Waiting for deployment "shipping-service-app" rollout to finish: 3 out of 5 new replicas have been updated...
+Waiting for deployment "shipping-service-app" rollout to finish: 3 out of 5 new replicas have been updated...
+Waiting for deployment "shipping-service-app" rollout to finish: 4 out of 5 new replicas have been updated...
+Waiting for deployment "shipping-service-app" rollout to finish: 2 old replicas are pending termination...
+Waiting for deployment "shipping-service-app" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "shipping-service-app" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "shipping-service-app" rollout to finish: 1 old replicas are pending termination...
+deployment "shipping-service-app" successfully rolled out
 ```
 
 After the scale-up and delay reset, the updated consumer counts are:

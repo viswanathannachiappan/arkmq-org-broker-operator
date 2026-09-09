@@ -24,25 +24,18 @@ full list.
 
 ## Build the container image
 
-The `Containerfile` is a multi-stage build: Maven and the JDK run inside the
-builder stage, so the only local prerequisite is a container build tool (Docker
-or Podman).
+The image is built with the local Docker daemon, which provides internet access
+for Maven to download dependencies, and then loaded directly into Minikube. No
+container registry is required.
 
-### Using Minikube's built-in Docker daemon (recommended for the tutorial)
+The source lives alongside this tutorial in [`camel-jms-app/`](.). The
+`Containerfile` is a multi-stage build — Maven and the JDK run inside the
+builder container, so no local JDK or Maven installation is required.
 
-```bash
-# Point your shell at Minikube's Docker daemon so the image is available
-# inside the cluster without a registry push.
-eval $(minikube docker-env --profile brokerservice-monitoring)
-
-docker build -f docs/tutorials/brokerservice/camel-jms-app/Containerfile docs/tutorials/brokerservice/camel-jms-app/ -t camel-jms-app:latest
-```
-
-### Using a local Docker or Podman daemon
+Run from the **root of the repository**:
 
 ```bash
 docker build -f docs/tutorials/brokerservice/camel-jms-app/Containerfile docs/tutorials/brokerservice/camel-jms-app/ -t camel-jms-app:latest
-# then load into Minikube
 minikube image load camel-jms-app:latest --profile brokerservice-monitoring
 ```
 
